@@ -192,6 +192,16 @@
         </a-form>
       </template>
 
+      <!-- hysteria settings -->
+      <template v-if="outbound.protocol === Protocols.Hysteria">
+        <a-form-item label='{{ i18n "pages.inbounds.address" }}'>
+          <a-input v-model.trim="outbound.settings.address"></a-input>
+        </a-form-item>
+        <a-form-item label='{{ i18n "pages.inbounds.port" }}'>
+          <a-input-number v-model.number="outbound.settings.port" :min="1" :max="65532"></a-input-number>
+        </a-form-item>
+      </template>
+
       <!-- Address + Port -->
       <template v-if="outbound.hasAddressPort()">
         <a-form-item label='{{ i18n "pages.inbounds.address" }}'>
@@ -274,6 +284,8 @@
             <a-select-option value="grpc">gRPC</a-select-option>
             <a-select-option value="httpupgrade">HTTPUpgrade</a-select-option>
             <a-select-option value="splithttp">SplitHTTP</a-select-option>
+            <a-select-option value="xhttp">XHTTP</a-select-option>
+            <a-select-option v-if="outbound.protocol === Protocols.Hysteria" value="hysteria">Hysteria2</a-select-option>
           </a-select>
         </a-form-item>
         <template v-if="outbound.stream.network === 'tcp'">
@@ -379,6 +391,46 @@
           </a-form-item>
           <a-form-item label='{{ i18n "path" }}'>
             <a-input v-model.trim="outbound.stream.splithttp.path"></a-input>
+          </a-form-item>
+        </template>
+
+        <!-- xhttp -->
+        <template v-if="outbound.stream.network === 'xhttp'">
+          <a-form-item label='{{ i18n "host" }}'>
+            <a-input v-model="outbound.stream.xhttp.host"></a-input>
+          </a-form-item>
+          <a-form-item label='{{ i18n "path" }}'>
+            <a-input v-model.trim="outbound.stream.xhttp.path"></a-input>
+          </a-form-item>
+          <a-form-item label='Mode'>
+            <a-select v-model="outbound.stream.xhttp.mode" :dropdown-class-name="themeSwitcher.currentTheme">
+              <a-select-option value="auto">auto</a-select-option>
+              <a-select-option value="packet-up">packet-up</a-select-option>
+              <a-select-option value="stream-up">stream-up</a-select-option>
+              <a-select-option value="stream-one">stream-one</a-select-option>
+            </a-select>
+          </a-form-item>
+        </template>
+
+        <!-- hysteria -->
+        <template v-if="outbound.stream.network === 'hysteria'">
+          <a-form-item label='Auth Password'>
+            <a-input v-model.trim="outbound.stream.hysteria.auth"></a-input>
+          </a-form-item>
+          <a-form-item label='Upload Speed'>
+            <a-input v-model.trim="outbound.stream.hysteria.up"></a-input>
+          </a-form-item>
+          <a-form-item label='Download Speed'>
+            <a-input v-model.trim="outbound.stream.hysteria.down"></a-input>
+          </a-form-item>
+          <a-form-item label='UDP Hop Port'>
+            <a-input v-model.trim="outbound.stream.hysteria.udphopPort"></a-input>
+          </a-form-item>
+          <a-form-item label='UDP Hop Interval (s)' v-if="outbound.stream.hysteria.udphopPort">
+            <a-input-number v-model.number="outbound.stream.hysteria.udphopInterval" :min="5"></a-input-number>
+          </a-form-item>
+          <a-form-item label='Max Idle Timeout (s)'>
+            <a-input-number v-model.number="outbound.stream.hysteria.maxIdleTimeout" :min="4" :max="120"></a-input-number>
           </a-form-item>
         </template>
       </template>
