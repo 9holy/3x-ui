@@ -94,6 +94,17 @@ rm -rf "mtg-multi-1.16.1-linux-${MTG_PLATFORM}" "mtg-multi-1.16.1-linux-${MTG_PL
 chmod +x "${MTG_BIN}"
 download "https://github.com/tuic-protocol/tuic/releases/download/tuic-server-1.0.0/tuic-server-1.0.0-${TUIC_TARGET}" "${TUIC_BIN}"
 chmod +x "${TUIC_BIN}"
+download "https://github.com/amnezia-vpn/amneziawg-tools/releases/download/v3.1.20260812/alpine-3.19-amneziawg-tools.zip" awg-tools.zip
+unzip awg-tools.zip
+mv alpine-3.19-amneziawg-tools/awg awg
+mv alpine-3.19-amneziawg-tools/awg-quick awg-quick
+rm -rf alpine-3.19-amneziawg-tools awg-tools.zip
+chmod +x awg awg-quick
+download "https://github.com/amnezia-vpn/amneziawg-go/archive/refs/heads/master.tar.gz" amneziawg-go.tar.gz
+tar -xzf amneziawg-go.tar.gz
+go build -o amneziawg-go ./amneziawg-go-master
+rm -rf amneziawg-go-master amneziawg-go.tar.gz
+chmod +x amneziawg-go
 download "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" geoip.dat
 download "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" geosite.dat
 download "https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geoip.dat" geoip_IR.dat
