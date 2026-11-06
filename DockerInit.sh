@@ -102,7 +102,7 @@ rm -rf alpine-3.19-amneziawg-tools awg-tools.zip
 chmod +x awg awg-quick
 download "https://github.com/amnezia-vpn/amneziawg-go/archive/refs/heads/master.tar.gz" amneziawg-go.tar.gz
 tar -xzf amneziawg-go.tar.gz
-go build -o amneziawg-go ./amneziawg-go-master
+(cd amneziawg-go-master && go build -o ../amneziawg-go .)
 rm -rf amneziawg-go-master amneziawg-go.tar.gz
 chmod +x amneziawg-go
 download "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" geoip.dat
