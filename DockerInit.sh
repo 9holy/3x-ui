@@ -33,6 +33,33 @@ esac
 
 case $1 in
     amd64 | "")
+        TUIC_TARGET="x86_64-unknown-linux-musl"
+        TUIC_BIN="tuic-server-linux-amd64"
+        ;;
+    i386)
+        TUIC_TARGET="i686-unknown-linux-musl"
+        TUIC_BIN="tuic-server-linux-386"
+        ;;
+    armv8 | arm64 | aarch64)
+        TUIC_TARGET="aarch64-unknown-linux-musl"
+        TUIC_BIN="tuic-server-linux-arm64"
+        ;;
+    armv7 | arm | arm32)
+        TUIC_TARGET="armv7-unknown-linux-musleabihf"
+        TUIC_BIN="tuic-server-linux-armv7"
+        ;;
+    armv6)
+        TUIC_TARGET="armv7-unknown-linux-musleabihf"
+        TUIC_BIN="tuic-server-linux-armv6"
+        ;;
+    *)
+        TUIC_TARGET="x86_64-unknown-linux-musl"
+        TUIC_BIN="tuic-server-linux-amd64"
+        ;;
+esac
+
+case $1 in
+    amd64 | "")
         MTG_PLATFORM="amd64"
         MTG_BIN="mtg-linux-amd64"
         ;;
@@ -65,6 +92,8 @@ tar -xzf "mtg-multi-1.16.1-linux-${MTG_PLATFORM}.tar.gz"
 mv "mtg-multi-1.16.1-linux-${MTG_PLATFORM}/mtg-multi" "${MTG_BIN}"
 rm -rf "mtg-multi-1.16.1-linux-${MTG_PLATFORM}" "mtg-multi-1.16.1-linux-${MTG_PLATFORM}.tar.gz"
 chmod +x "${MTG_BIN}"
+download "https://github.com/tuic-protocol/tuic/releases/download/tuic-server-1.0.0/tuic-server-1.0.0-${TUIC_TARGET}" "${TUIC_BIN}"
+chmod +x "${TUIC_BIN}"
 download "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" geoip.dat
 download "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" geosite.dat
 download "https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geoip.dat" geoip_IR.dat
