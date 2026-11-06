@@ -1282,7 +1282,15 @@ class Inbound extends XrayCommonClass {
             case Protocols.VLESS: return this.settings.vlesses;
             case Protocols.TROJAN: return this.settings.trojans;
             case Protocols.SHADOWSOCKS: return this.isSSMultiUser ? this.settings.shadowsockses : null;
-            default: return null;
+            default:
+                if (RAW_PROTOCOLS.includes(this.protocol)) {
+                    try {
+                        return JSON.parse(this.rawSettingsText || '{}').clients || null;
+                    } catch {
+                        return null;
+                    }
+                }
+                return null;
         }
     }
 
@@ -1877,8 +1885,28 @@ class Inbound extends XrayCommonClass {
                 return this.genSSLink(address, port, forceTls, remark, this.isSSMultiUser ? client.password : '');
             case Protocols.TROJAN:
                 return this.genTrojanLink(address, port, forceTls, remark, client.password);
+            case Protocols.HYSTERIA:
+            case Protocols.TUIC:
+            case Protocols.MTPROTO:
+                return this.genRawProtocolLink(address, port, remark, client);
             default: return '';
         }
+    }
+
+    genRawProtocolLink(address, port, remark, client = {}) {
+        if (this.protocol === Protocols.HYSTERIA) {
+            const auth = client.auth || client.secret || client.password;
+            return auth ? `hysteria2://${encodeURIComponent(auth)}@${address}:${port}/?sni=${encodeURIComponent(address)}#${encodeURIComponent(remark)}` : '';
+        }
+        if (this.protocol === Protocols.TUIC) {
+            const id = client.id || client.uuid;
+            const password = client.password || client.secret;
+            return id && password ? `tuic://${encodeURIComponent(id)}:${encodeURIComponent(password)}@${address}:${port}/?alpn=h3&congestion_control=bbr#${encodeURIComponent(remark)}` : '';
+        }
+        if (this.protocol === Protocols.MTPROTO) {
+            return client.secret ? `tg://proxy?server=${encodeURIComponent(address)}&port=${port}&secret=${encodeURIComponent(client.secret)}#${encodeURIComponent(remark)}` : '';
+        }
+        return '';
     }
 
     genAllLinks(remark = '', remarkModel = '-ieo', client) {

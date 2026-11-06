@@ -112,7 +112,7 @@ func (s *SubService) getInboundsBySubId(subId string) ([]*model.Inbound, error) 
 		FROM inbounds,
 			JSON_EACH(JSON_EXTRACT(inbounds.settings, '$.clients')) AS client 
 		WHERE
-			protocol in ('vmess','vless','trojan','shadowsocks')
+			protocol in ('vmess','vless','trojan','shadowsocks','hysteria','tuic','mtproto','amneziawg','masque','tun')
 			AND JSON_EXTRACT(client.value, '$.subId') = ? AND enable = ?
 	)`, subId, true).Find(&inbounds).Error
 	if err != nil {
@@ -163,6 +163,60 @@ func (s *SubService) getLink(inbound *model.Inbound, email string) string {
 		return s.genTrojanLink(inbound, email)
 	case "shadowsocks":
 		return s.genShadowsocksLink(inbound, email)
+	case "hysteria", "tuic", "mtproto", "amneziawg", "masque", "tun":
+		return s.genProtocolLink(inbound, email)
+	}
+	return ""
+}
+
+func (s *SubService) genProtocolLink(inbound *model.Inbound, email string) string {
+	var settings struct {
+		Clients []map[string]interface{} `json:"clients"`
+	}
+	if err := json.Unmarshal([]byte(inbound.Settings), &settings); err != nil {
+		return ""
+	}
+	var client map[string]interface{}
+	for _, item := range settings.Clients {
+		if item["email"] == email {
+			client = item
+			break
+		}
+	}
+	if client == nil {
+		return ""
+	}
+	remark := url.QueryEscape(s.genRemark(inbound, email, ""))
+	host := s.address
+	port := inbound.Port
+	stringValue := func(keys ...string) string {
+		for _, key := range keys {
+			if value, ok := client[key].(string); ok && value != "" {
+				return value
+			}
+		}
+		return ""
+	}
+	switch inbound.Protocol {
+	case model.Hysteria:
+		auth := stringValue("auth", "secret", "password")
+		if auth == "" {
+			return ""
+		}
+		return fmt.Sprintf("hysteria2://%s@%s:%d/?sni=%s#%s", url.PathEscape(auth), host, port, url.QueryEscape(host), remark)
+	case model.TUIC:
+		id := stringValue("id", "uuid")
+		password := stringValue("password", "secret")
+		if id == "" || password == "" {
+			return ""
+		}
+		return fmt.Sprintf("tuic://%s:%s@%s:%d/?alpn=h3&congestion_control=bbr#%s", url.PathEscape(id), url.PathEscape(password), host, port, remark)
+	case model.MTProto:
+		secret := stringValue("secret")
+		if secret == "" {
+			return ""
+		}
+		return fmt.Sprintf("tg://proxy?server=%s&port=%d&secret=%s#%s", url.QueryEscape(host), port, url.QueryEscape(secret), remark)
 	}
 	return ""
 }
