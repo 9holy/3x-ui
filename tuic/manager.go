@@ -79,12 +79,12 @@ func writeConfig(inst instance) error {
 	return os.WriteFile(configPath(inst.id), inst.config, 0o640)
 }
 
-func (m *Manager) Reconcile(inbounds []*Inbound) {
+func (m *Manager) Reconcile(inbounds []Inbound) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	wanted := map[int]instance{}
 	for _, inbound := range inbounds {
-		if inst, ok := parseInstance(inbound); ok {
+		if inst, ok := parseInstance(&inbound); ok {
 			wanted[inst.id] = inst
 		}
 	}
