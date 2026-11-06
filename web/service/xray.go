@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 
+	"x-ui/database/model"
 	"x-ui/logger"
 	"x-ui/xray"
 
@@ -80,6 +81,12 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	}
 	for _, inbound := range inbounds {
 		if !inbound.Enable {
+			continue
+		}
+		// Sidecar protocols are managed outside Xray. Their settings stay in
+		// SQLite so the legacy panel can preserve them without emitting an
+		// invalid Xray inbound.
+		if inbound.Protocol == model.MTProto || inbound.Protocol == model.TUIC || inbound.Protocol == model.AmneziaWG {
 			continue
 		}
 		// get settings clients

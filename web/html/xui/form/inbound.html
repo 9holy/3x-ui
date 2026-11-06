@@ -103,6 +103,11 @@
     {{template "form/wireguard"}}
 </template>
 
+<!-- native and sidecar protocols -->
+<template v-if="[Protocols.HYSTERIA, Protocols.MASQUE, Protocols.TUN, Protocols.MTPROTO, Protocols.TUIC, Protocols.AMNEZIAWG].includes(inbound.protocol)">
+    {{template "form/rawProtocol"}}
+</template>
+
 <!-- stream settings -->
 <template v-if="inbound.canEnableStream()">
     {{template "form/streamSettings"}}
