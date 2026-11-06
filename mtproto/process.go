@@ -21,7 +21,7 @@ type Process struct {
 }
 
 func binaryPath() string {
-	name := "mtg"
+	name := fmt.Sprintf("mtg-%s-%s", runtime.GOOS, runtime.GOARCH)
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
