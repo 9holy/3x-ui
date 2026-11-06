@@ -16,6 +16,7 @@ import (
 
 	"x-ui/config"
 	"x-ui/logger"
+	"x-ui/mtproto"
 	"x-ui/util/common"
 	"x-ui/web/controller"
 	"x-ui/web/job"
@@ -258,6 +259,7 @@ func (s *Server) startTask() {
 		time.Sleep(time.Second * 5)
 		// Statistics every 10 seconds, start the delay for 5 seconds for the first time, and staggered with the time to restart xray
 		s.cron.AddJob("@every 10s", job.NewXrayTrafficJob())
+		s.cron.AddJob("@every 5s", job.NewMtprotoJob())
 	}()
 
 	// check client ips from log file every 10 sec
@@ -375,6 +377,7 @@ func (s *Server) Start() (err error) {
 
 func (s *Server) Stop() error {
 	s.cancel()
+	mtproto.GetManager().StopAll()
 	s.xrayService.StopXray()
 	if s.cron != nil {
 		s.cron.Stop()
