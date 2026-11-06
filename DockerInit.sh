@@ -52,7 +52,7 @@ esac
 
 mkdir -p build/bin
 cd build/bin
-wget "https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-${ARCH}.zip"
+wget -t 5 -T 30 "https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-${ARCH}.zip"
 unzip "Xray-linux-${ARCH}.zip"
 rm -f "Xray-linux-${ARCH}.zip" geoip.dat geosite.dat
 mv xray "xray-linux-${FNAME}"
