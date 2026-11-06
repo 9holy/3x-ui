@@ -1,13 +1,15 @@
 # ========================================================
 # Stage: Builder
 # ========================================================
-FROM golang:1.23-alpine AS builder
+FROM golang:1.25-alpine AS builder
 WORKDIR /app
+ENV PATH="/app/bin:${PATH}"
 ARG TARGETARCH
 
 RUN apk --no-cache --update add \
   build-base \
   gcc \
+  curl \
   wget \
   unzip
 
@@ -24,12 +26,15 @@ RUN ./DockerInit.sh "$TARGETARCH"
 FROM alpine:latest
 ENV TZ=Asia/Shanghai
 WORKDIR /app
+ENV PATH="/app/bin:${PATH}"
 
 RUN apk add --no-cache --update \
   ca-certificates \
   tzdata \
   fail2ban \
-  bash
+  bash \
+  iproute2 \
+  iptables
 
 COPY --from=builder /app/build/ /app/
 COPY --from=builder /app/DockerEntrypoint.sh /app/

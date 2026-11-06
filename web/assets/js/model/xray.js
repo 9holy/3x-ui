@@ -7,7 +7,22 @@ const Protocols = {
     SOCKS: 'socks',
     HTTP: 'http',
     WIREGUARD: 'wireguard',
+    HYSTERIA: 'hysteria',
+    MASQUE: 'masque',
+    TUN: 'tun',
+    MTPROTO: 'mtproto',
+    TUIC: 'tuic',
+    AMNEZIAWG: 'amneziawg',
 };
+
+const RAW_PROTOCOLS = [
+    Protocols.HYSTERIA,
+    Protocols.MASQUE,
+    Protocols.TUN,
+    Protocols.MTPROTO,
+    Protocols.TUIC,
+    Protocols.AMNEZIAWG,
+];
 
 const SSMethods = {
     AES_256_GCM: 'aes-256-gcm',
@@ -1254,6 +1269,8 @@ class Inbound extends XrayCommonClass {
         this.sniffing = sniffing;
         this.allocate = allocate;
         this.clientStats = clientStats;
+        this.rawSettingsText = '{}';
+        this.rawStreamSettingsText = '{}';
     }
     getClientStats() {
         return this.clientStats;
@@ -1276,6 +1293,10 @@ class Inbound extends XrayCommonClass {
     set protocol(protocol) {
         this._protocol = protocol;
         this.settings = Inbound.Settings.getSettings(protocol);
+        if (RAW_PROTOCOLS.includes(protocol)) {
+            this.rawSettingsText = '{}';
+            this.rawStreamSettingsText = '{}';
+        }
         if (protocol === Protocols.TROJAN) {
             this.tls = false;
         }
@@ -1915,7 +1936,7 @@ class Inbound extends XrayCommonClass {
     }
 
     static fromJson(json = {}) {
-        return new Inbound(
+        const inbound = new Inbound(
             json.port,
             json.listen,
             json.protocol,
@@ -1925,19 +1946,28 @@ class Inbound extends XrayCommonClass {
             Sniffing.fromJson(json.sniffing),
             Allocate.fromJson(json.allocate),
             json.clientStats
-        )
+        );
+        if (RAW_PROTOCOLS.includes(json.protocol)) {
+            inbound.rawSettingsText = JSON.stringify(json.settings || {}, null, 2);
+            inbound.rawStreamSettingsText = JSON.stringify(json.streamSettings || {}, null, 2);
+        }
+        return inbound;
     }
 
     toJson() {
+        let settings = this.settings instanceof XrayCommonClass ? this.settings.toJson() : this.settings;
         let streamSettings;
-        if (this.canEnableStream()) {
+        if (RAW_PROTOCOLS.includes(this.protocol)) {
+            settings = JSON.parse(this.rawSettingsText || '{}');
+            streamSettings = JSON.parse(this.rawStreamSettingsText || '{}');
+        } else if (this.canEnableStream()) {
             streamSettings = this.stream.toJson();
         }
         return {
             port: this.port,
             listen: this.listen,
             protocol: this.protocol,
-            settings: this.settings instanceof XrayCommonClass ? this.settings.toJson() : this.settings,
+            settings: settings,
             streamSettings: streamSettings,
             tag: this.tag,
             sniffing: this.sniffing.toJson(),
@@ -1963,7 +1993,7 @@ Inbound.Settings = class extends XrayCommonClass {
             case Protocols.SOCKS: return new Inbound.SocksSettings(protocol);
             case Protocols.HTTP: return new Inbound.HttpSettings(protocol);
             case Protocols.WIREGUARD: return new Inbound.WireguardSettings(protocol);
-            default: return null;
+            default: return {};
         }
     }
 
@@ -1977,7 +2007,7 @@ Inbound.Settings = class extends XrayCommonClass {
             case Protocols.SOCKS: return Inbound.SocksSettings.fromJson(json);
             case Protocols.HTTP: return Inbound.HttpSettings.fromJson(json);
             case Protocols.WIREGUARD: return Inbound.WireguardSettings.fromJson(json);
-            default: return null;
+            default: return json || {};
         }
     }
 

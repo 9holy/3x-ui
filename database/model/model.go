@@ -18,6 +18,12 @@ const (
 	Shadowsocks Protocol = "shadowsocks"
 	Socks       Protocol = "socks"
 	WireGuard   Protocol = "wireguard"
+	Hysteria    Protocol = "hysteria"
+	Masque      Protocol = "masque"
+	Tun         Protocol = "tun"
+	MTProto     Protocol = "mtproto"
+	TUIC        Protocol = "tuic"
+	AmneziaWG   Protocol = "amneziawg"
 )
 
 type User struct {
