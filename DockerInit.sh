@@ -56,7 +56,7 @@ wget "https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-$
 unzip "Xray-linux-${ARCH}.zip"
 rm -f "Xray-linux-${ARCH}.zip" geoip.dat geosite.dat
 mv xray "xray-linux-${FNAME}"
-wget "https://github.com/mhsanaei/mtg-multi/releases/download/v1.16.1/mtg-multi-1.16.1-linux-${MTG_PLATFORM}.tar.gz"
+wget -t 5 -T 30 "https://github.com/mhsanaei/mtg-multi/releases/download/v1.16.1/mtg-multi-1.16.1-linux-${MTG_PLATFORM}.tar.gz"
 tar -xzf "mtg-multi-1.16.1-linux-${MTG_PLATFORM}.tar.gz"
 mv "mtg-multi-1.16.1-linux-${MTG_PLATFORM}/mtg-multi" "${MTG_BIN}"
 rm -rf "mtg-multi-1.16.1-linux-${MTG_PLATFORM}" "mtg-multi-1.16.1-linux-${MTG_PLATFORM}.tar.gz"
