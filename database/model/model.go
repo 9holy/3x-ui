@@ -96,6 +96,7 @@ type Client struct {
 	ID         string `json:"id"`
 	Security   string `json:"security"`
 	Password   string `json:"password"`
+	Secret     string `json:"secret"`
 	Flow       string `json:"flow"`
 	Email      string `json:"email"`
 	LimitIP    int    `json:"limitIp"`

@@ -3,13 +3,18 @@ package mtproto
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	"x-ui/config"
 	"x-ui/database/model"
 	"x-ui/logger"
+	"x-ui/xray"
 )
 
 const Protocol model.Protocol = "mtproto"
@@ -29,9 +34,16 @@ type secretEntry struct {
 type Manager struct {
 	mu    sync.Mutex
 	procs map[int]*Process
+	ports map[int]int
+	last  map[int]map[string]statsCounter
 }
 
-var singleton = &Manager{procs: map[int]*Process{}}
+type statsCounter struct {
+	Up   int64
+	Down int64
+}
+
+var singleton = &Manager{procs: map[int]*Process{}, ports: map[int]int{}, last: map[int]map[string]statsCounter{}}
 
 func GetManager() *Manager { return singleton }
 
@@ -98,7 +110,7 @@ func hasEnableField(raw []byte, email string) bool {
 	return false
 }
 
-func writeConfig(inst instance) error {
+func writeConfig(inst instance, apiPort int) error {
 	if err := os.MkdirAll(configDir(), 0o750); err != nil {
 		return err
 	}
@@ -106,7 +118,7 @@ func writeConfig(inst instance) error {
 	if listen == "" {
 		listen = "0.0.0.0"
 	}
-	content := fmt.Sprintf("bind-to = %q\n\n[secrets]\n", fmt.Sprintf("%s:%d", listen, inst.port))
+	content := fmt.Sprintf("bind-to = %q\napi-bind-to = %q\n\n[secrets]\n", fmt.Sprintf("%s:%d", listen, inst.port), fmt.Sprintf("127.0.0.1:%d", apiPort))
 	for _, secret := range inst.secrets {
 		content += fmt.Sprintf("%q = %q\n", secret.name, secret.secret)
 	}
@@ -126,6 +138,8 @@ func (m *Manager) Reconcile(inbounds []*model.Inbound) {
 		if _, ok := wanted[id]; !ok {
 			_ = proc.Stop()
 			delete(m.procs, id)
+			delete(m.ports, id)
+			delete(m.last, id)
 			_ = os.Remove(configPath(id))
 		}
 	}
@@ -133,7 +147,12 @@ func (m *Manager) Reconcile(inbounds []*model.Inbound) {
 		if proc := m.procs[id]; proc != nil && proc.Running() {
 			continue
 		}
-		if err := writeConfig(inst); err != nil {
+		apiPort, err := freePort()
+		if err != nil {
+			logger.Warning("mtproto api port failed:", err)
+			continue
+		}
+		if err := writeConfig(inst, apiPort); err != nil {
 			logger.Warning("mtproto config failed:", err)
 			continue
 		}
@@ -143,6 +162,8 @@ func (m *Manager) Reconcile(inbounds []*model.Inbound) {
 			continue
 		}
 		m.procs[id] = proc
+		m.ports[id] = apiPort
+		m.last[id] = map[string]statsCounter{}
 	}
 }
 
@@ -154,4 +175,77 @@ func (m *Manager) StopAll() {
 		_ = os.Remove(configPath(id))
 	}
 	m.procs = map[int]*Process{}
+	m.ports = map[int]int{}
+	m.last = map[int]map[string]statsCounter{}
+}
+
+type statsResponse struct {
+	Users map[string]struct {
+		BytesIn  int64 `json:"bytes_in"`
+		BytesOut int64 `json:"bytes_out"`
+	} `json:"users"`
+}
+
+func freePort() (int, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port, nil
+}
+
+// CollectTraffic returns deltas since the previous poll in the format used by
+// the existing SQLite client_traffics updater.
+func (m *Manager) CollectTraffic() []*xray.ClientTraffic {
+	m.mu.Lock()
+	ports := make(map[int]int, len(m.ports))
+	last := make(map[int]map[string]statsCounter, len(m.last))
+	for id, port := range m.ports {
+		ports[id] = port
+		last[id] = m.last[id]
+	}
+	m.mu.Unlock()
+
+	type result struct {
+		id    int
+		users map[string]statsCounter
+	}
+	results := make([]result, 0, len(ports))
+	for id, port := range ports {
+		resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/stats")
+		if err != nil {
+			continue
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil || resp.StatusCode != http.StatusOK {
+			continue
+		}
+		var parsed statsResponse
+		if json.Unmarshal(body, &parsed) != nil {
+			continue
+		}
+		users := make(map[string]statsCounter, len(parsed.Users))
+		for email, user := range parsed.Users {
+			users[email] = statsCounter{Up: user.BytesIn, Down: user.BytesOut}
+		}
+		results = append(results, result{id: id, users: users})
+	}
+
+	traffic := make([]*xray.ClientTraffic, 0)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, item := range results {
+		previous := last[item.id]
+		for email, current := range item.users {
+			old := previous[email]
+			up, down := current.Up-old.Up, current.Down-old.Down
+			if up > 0 || down > 0 {
+				traffic = append(traffic, &xray.ClientTraffic{InboundId: item.id, Email: email, Up: up, Down: down})
+			}
+		}
+		m.last[item.id] = item.users
+	}
+	return traffic
 }
