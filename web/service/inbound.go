@@ -22,6 +22,10 @@ type InboundService struct {
 	xrayApi xray.XrayAPI
 }
 
+func isSidecarProtocol(protocol model.Protocol) bool {
+	return protocol == model.MTProto || protocol == model.TUIC || protocol == model.AmneziaWG
+}
+
 func (s *InboundService) GetInbounds(userId int) ([]*model.Inbound, error) {
 	db := database.GetDB()
 	var inbounds []*model.Inbound
@@ -177,7 +181,11 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 
 	// Secure client ID
 	for _, client := range clients {
-		if inbound.Protocol == "trojan" {
+		if isSidecarProtocol(inbound.Protocol) {
+			if client.Email == "" || (client.Secret == "" && client.ID == "" && client.Password == "") {
+				return inbound, false, common.NewError("empty client secret")
+			}
+		} else if inbound.Protocol == "trojan" {
 			if client.Password == "" {
 				return inbound, false, common.NewError("empty client ID")
 			}
@@ -214,7 +222,7 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 	}
 
 	needRestart := false
-	if inbound.Enable {
+	if inbound.Enable && !isSidecarProtocol(inbound.Protocol) {
 		s.xrayApi.Init(p.GetAPIPort())
 		inboundJson, err1 := json.MarshalIndent(inbound.GenXrayInboundConfig(), "", "  ")
 		if err1 != nil {
@@ -238,9 +246,11 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 	db := database.GetDB()
 
 	var tag string
+	var protocol model.Protocol
 	needRestart := false
 	result := db.Model(model.Inbound{}).Select("tag").Where("id = ? and enable = ?", id, true).First(&tag)
-	if result.Error == nil {
+	db.Model(model.Inbound{}).Select("protocol").Where("id = ?", id).Scan(&protocol)
+	if result.Error == nil && !isSidecarProtocol(protocol) {
 		s.xrayApi.Init(p.GetAPIPort())
 		err1 := s.xrayApi.DelInbound(tag)
 		if err1 == nil {
@@ -339,11 +349,13 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	}
 
 	needRestart := false
-	s.xrayApi.Init(p.GetAPIPort())
-	if s.xrayApi.DelInbound(tag) == nil {
-		logger.Debug("Old inbound deleted by api:", tag)
+	if !isSidecarProtocol(oldInbound.Protocol) {
+		s.xrayApi.Init(p.GetAPIPort())
+		if s.xrayApi.DelInbound(tag) == nil {
+			logger.Debug("Old inbound deleted by api:", tag)
+		}
 	}
-	if inbound.Enable {
+	if inbound.Enable && !isSidecarProtocol(oldInbound.Protocol) {
 		inboundJson, err2 := json.MarshalIndent(oldInbound.GenXrayInboundConfig(), "", "  ")
 		if err2 != nil {
 			logger.Debug("Unable to marshal updated inbound config:", err2)
@@ -358,7 +370,9 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 			}
 		}
 	}
-	s.xrayApi.Close()
+	if !isSidecarProtocol(oldInbound.Protocol) {
+		s.xrayApi.Close()
+	}
 
 	return inbound, needRestart, tx.Save(oldInbound).Error
 }
@@ -487,11 +501,13 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 	}()
 
 	needRestart := false
-	s.xrayApi.Init(p.GetAPIPort())
+	if !isSidecarProtocol(oldInbound.Protocol) {
+		s.xrayApi.Init(p.GetAPIPort())
+	}
 	for _, client := range clients {
 		if len(client.Email) > 0 {
 			s.AddClientStat(tx, data.Id, &client)
-			if client.Enable {
+			if client.Enable && !isSidecarProtocol(oldInbound.Protocol) {
 				cipher := ""
 				if oldInbound.Protocol == "shadowsocks" {
 					cipher = oldSettings["method"].(string)
@@ -515,7 +531,9 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 			needRestart = true
 		}
 	}
-	s.xrayApi.Close()
+	if !isSidecarProtocol(oldInbound.Protocol) {
+		s.xrayApi.Close()
+	}
 
 	return needRestart, tx.Save(oldInbound).Error
 }
@@ -534,7 +552,9 @@ func (s *InboundService) DelInboundClient(inboundId int, clientId string) (bool,
 
 	email := ""
 	client_key := "id"
-	if oldInbound.Protocol == "trojan" {
+	if isSidecarProtocol(oldInbound.Protocol) {
+		client_key = "email"
+	} else if oldInbound.Protocol == "trojan" {
 		client_key = "password"
 	}
 	if oldInbound.Protocol == "shadowsocks" {
@@ -588,7 +608,7 @@ func (s *InboundService) DelInboundClient(inboundId int, clientId string) (bool,
 			logger.Error("Delete stats Data Error")
 			return false, err
 		}
-		if needApiDel && notDepleted {
+		if needApiDel && notDepleted && !isSidecarProtocol(oldInbound.Protocol) {
 			s.xrayApi.Init(p.GetAPIPort())
 			err1 := s.xrayApi.RemoveUser(oldInbound.Tag, email)
 			if err1 == nil {
@@ -639,7 +659,10 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 	clientIndex := -1
 	for index, oldClient := range oldClients {
 		oldClientId := ""
-		if oldInbound.Protocol == "trojan" {
+		if isSidecarProtocol(oldInbound.Protocol) {
+			oldClientId = oldClient.Email
+			newClientId = clients[0].Email
+		} else if oldInbound.Protocol == "trojan" {
 			oldClientId = oldClient.Password
 			newClientId = clients[0].Password
 		} else if oldInbound.Protocol == "shadowsocks" {
@@ -721,7 +744,7 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 		}
 	}
 	needRestart := false
-	if len(oldEmail) > 0 {
+	if len(oldEmail) > 0 && !isSidecarProtocol(oldInbound.Protocol) {
 		s.xrayApi.Init(p.GetAPIPort())
 		if oldClients[clientIndex].Enable {
 			err1 := s.xrayApi.RemoveUser(oldInbound.Tag, oldEmail)
