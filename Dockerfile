@@ -26,6 +26,7 @@ RUN ./DockerInit.sh "$TARGETARCH"
 FROM alpine:latest
 ENV TZ=Asia/Shanghai
 WORKDIR /app
+ENV PATH="/app/bin:${PATH}"
 
 RUN apk add --no-cache --update \
   ca-certificates \
