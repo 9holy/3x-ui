@@ -15,9 +15,14 @@ import (
 const Protocol model.Protocol = "mtproto"
 
 type instance struct {
-	id     int
-	listen string
-	port   int
+	id      int
+	listen  string
+	port    int
+	secrets []secretEntry
+}
+
+type secretEntry struct {
+	name   string
 	secret string
 }
 
@@ -43,12 +48,54 @@ func parseInstance(inbound *model.Inbound) (instance, bool) {
 		return instance{}, false
 	}
 	var settings struct {
-		Secret string `json:"secret"`
+		Secret  string `json:"secret"`
+		Email   string `json:"email"`
+		Clients []struct {
+			Email  string `json:"email"`
+			Secret string `json:"secret"`
+			Enable bool   `json:"enable"`
+		} `json:"clients"`
 	}
-	if json.Unmarshal([]byte(inbound.Settings), &settings) != nil || settings.Secret == "" {
+	if json.Unmarshal([]byte(inbound.Settings), &settings) != nil {
 		return instance{}, false
 	}
-	return instance{id: inbound.Id, listen: inbound.Listen, port: inbound.Port, secret: settings.Secret}, true
+	secrets := make([]secretEntry, 0, len(settings.Clients)+1)
+	for _, client := range settings.Clients {
+		if client.Enable || !hasEnableField([]byte(inbound.Settings), client.Email) {
+			if client.Email != "" && client.Secret != "" {
+				secrets = append(secrets, secretEntry{name: client.Email, secret: client.Secret})
+			}
+		}
+	}
+	if len(secrets) == 0 && settings.Secret != "" {
+		name := settings.Email
+		if name == "" {
+			name = "default"
+		}
+		secrets = append(secrets, secretEntry{name: name, secret: settings.Secret})
+	}
+	if len(secrets) == 0 {
+		return instance{}, false
+	}
+	return instance{id: inbound.Id, listen: inbound.Listen, port: inbound.Port, secrets: secrets}, true
+}
+
+func hasEnableField(raw []byte, email string) bool {
+	var settings struct {
+		Clients []struct {
+			Email  string `json:"email"`
+			Enable *bool  `json:"enable"`
+		} `json:"clients"`
+	}
+	if json.Unmarshal(raw, &settings) != nil {
+		return false
+	}
+	for _, client := range settings.Clients {
+		if client.Email == email {
+			return client.Enable != nil
+		}
+	}
+	return false
 }
 
 func writeConfig(inst instance) error {
@@ -59,7 +106,10 @@ func writeConfig(inst instance) error {
 	if listen == "" {
 		listen = "0.0.0.0"
 	}
-	content := fmt.Sprintf("secret = %q\nbind-to = %q\n", inst.secret, fmt.Sprintf("%s:%d", listen, inst.port))
+	content := fmt.Sprintf("bind-to = %q\n\n[secrets]\n", fmt.Sprintf("%s:%d", listen, inst.port))
+	for _, secret := range inst.secrets {
+		content += fmt.Sprintf("%q = %q\n", secret.name, secret.secret)
+	}
 	return os.WriteFile(configPath(inst.id), []byte(content), 0o640)
 }
 
