@@ -12,17 +12,19 @@ import (
 )
 
 type Process struct {
-	mu     sync.Mutex
-	cmd    *exec.Cmd
-	ifName string
-	config string
+	mu        sync.Mutex
+	cmd       *exec.Cmd
+	ifName    string
+	config    string
+	signature string
 }
 
-func newProcess(ifName, config string) *Process {
-	return &Process{ifName: ifName, config: config}
+func newProcess(ifName, config, signature string) *Process {
+	return &Process{ifName: ifName, config: config, signature: signature}
 }
 
 func (p *Process) ConfigPath() string { return p.config }
+func (p *Process) Signature() string  { return p.signature }
 
 func (p *Process) Running() bool {
 	p.mu.Lock()

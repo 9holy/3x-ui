@@ -78,7 +78,7 @@ func (m *Manager) Reconcile(inbounds []*model.Inbound) {
 		}
 	}
 	for id, item := range wanted {
-		if proc := m.procs[id]; proc != nil && proc.Running() && proc.ConfigPath() == item.configPath {
+		if proc := m.procs[id]; proc != nil && proc.Running() && proc.ConfigPath() == item.configPath && proc.Signature() == item.config {
 			continue
 		}
 		if proc := m.procs[id]; proc != nil {
@@ -90,7 +90,7 @@ func (m *Manager) Reconcile(inbounds []*model.Inbound) {
 			logger.Warning("amneziawg config failed:", err)
 			continue
 		}
-		proc := newProcess(item.ifName, path)
+		proc := newProcess(item.ifName, path, item.config)
 		if err := proc.Start(); err != nil {
 			logger.Warning("amneziawg start failed:", err)
 			continue
