@@ -11,11 +11,19 @@ import (
 	"sync"
 
 	"x-ui/config"
-	"x-ui/database/model"
 	"x-ui/logger"
 )
 
-const Protocol model.Protocol = "tuic"
+const Protocol = "tuic"
+
+type Inbound struct {
+	Id       int
+	Listen   string
+	Port     int
+	Protocol string
+	Enable   bool
+	Settings string
+}
 
 type instance struct {
 	id     int
@@ -40,7 +48,7 @@ func binaryPath() string {
 	return filepath.Join(config.GetBinFolderPath(), fmt.Sprintf("tuic-server-linux-%s", runtime.GOARCH))
 }
 
-func parseInstance(inbound *model.Inbound) (instance, bool) {
+func parseInstance(inbound *Inbound) (instance, bool) {
 	if inbound == nil || inbound.Protocol != Protocol || !inbound.Enable {
 		return instance{}, false
 	}
@@ -71,7 +79,7 @@ func writeConfig(inst instance) error {
 	return os.WriteFile(configPath(inst.id), inst.config, 0o640)
 }
 
-func (m *Manager) Reconcile(inbounds []*model.Inbound) {
+func (m *Manager) Reconcile(inbounds []*Inbound) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	wanted := map[int]instance{}
