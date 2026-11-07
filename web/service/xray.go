@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 
 	"x-ui/database/model"
@@ -89,6 +90,9 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		if inbound.Protocol == model.MTProto || inbound.Protocol == model.TUIC || inbound.Protocol == model.AmneziaWG {
 			continue
 		}
+		if err := xray.CheckLegacyStreamSettings(inbound.StreamSettings); err != nil {
+			return nil, fmt.Errorf("inbound %s: %w", inbound.Tag, err)
+		}
 		// get settings clients
 		settings := map[string]interface{}{}
 		json.Unmarshal([]byte(inbound.Settings), &settings)
@@ -119,14 +123,9 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 						continue
 					}
 				}
-				for key := range c {
-					if key != "email" && key != "id" && key != "password" && key != "flow" && key != "method" {
-						delete(c, key)
-					}
-					if c["flow"] == "xtls-rprx-vision-udp443" {
-						c["flow"] = "xtls-rprx-vision"
-					}
-				}
+				// GenXrayInboundConfig strips panel metadata and normalizes
+				// credentials centrally. An old allowlist here erased newer
+				// protocol fields such as Hysteria auth and MASQUE pass.
 				final_clients = append(final_clients, interface{}(c))
 			}
 
@@ -167,6 +166,7 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		inboundConfig := inbound.GenXrayInboundConfig()
 		xrayConfig.InboundConfigs = append(xrayConfig.InboundConfigs, *inboundConfig)
 	}
+	xray.NormalizeConfigProtocols(xrayConfig)
 	return xrayConfig, nil
 }
 
@@ -203,7 +203,17 @@ func (s *XrayService) RestartXray(isForce bool) error {
 			logger.Debug("It does not need to restart xray")
 			return nil
 		}
-		p.Stop()
+	}
+	// Validate the complete effective template with the installed core before
+	// stopping a working process. A bad advanced-protocol setting must not
+	// disconnect every otherwise healthy inbound.
+	if err := xray.ValidateConfig(xrayConfig); err != nil {
+		return err
+	}
+	if s.IsXrayRunning() {
+		if err := p.Stop(); err != nil {
+			return err
+		}
 	}
 
 	p = xray.NewProcess(xrayConfig)

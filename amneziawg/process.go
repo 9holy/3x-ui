@@ -1,26 +1,37 @@
 package amneziawg
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
-	"strings"
+	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
+
+	"x-ui/config"
 )
 
+// awg-quick is a one-shot interface setup command, not the interface's daemon.
+// A successful "up" therefore remains active after that command exits.
 type Process struct {
-	mu        sync.Mutex
-	cmd       *exec.Cmd
-	ifName    string
-	config    string
-	signature string
+	mu              sync.Mutex
+	ifName          string
+	config          string
+	signature       string
+	active          bool
+	interfaceExists func(string) bool
 }
 
-func newProcess(ifName, config, signature string) *Process {
-	return &Process{ifName: ifName, config: config, signature: signature}
+func newProcess(ifName, configPath, signature string) *Process {
+	return &Process{ifName: ifName, config: configPath, signature: signature, interfaceExists: interfaceExists}
+}
+
+func interfaceExists(name string) bool {
+	_, err := net.InterfaceByName(name)
+	return err == nil
 }
 
 func (p *Process) ConfigPath() string { return p.config }
@@ -29,72 +40,78 @@ func (p *Process) Signature() string  { return p.signature }
 func (p *Process) Running() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.cmd != nil && p.cmd.Process != nil && p.cmd.ProcessState == nil
+	return p.active && p.interfaceExists(p.ifName)
+}
+
+func commandName() string {
+	if name := os.Getenv("AMNEZIAWG_QUICK"); name != "" {
+		return name
+	}
+	path := filepath.Join(config.GetBinFolderPath(), "awg-quick")
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		if absolute, err := filepath.Abs(path); err == nil {
+			return absolute
+		}
+	}
+	return "awg-quick"
+}
+
+func (p *Process) run(action string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, commandName(), action, p.config)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	binDir, _ := filepath.Abs(config.GetBinFolderPath())
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	goImpl := os.Getenv("AMNEZIAWG_GO")
+	if goImpl == "" {
+		candidate := filepath.Join(binDir, "amneziawg-go")
+		if _, err := os.Stat(candidate); err == nil {
+			goImpl = candidate
+		}
+	}
+	if goImpl != "" {
+		cmd.Env = append(cmd.Env, "WG_QUICK_USERSPACE_IMPLEMENTATION="+goImpl)
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("awg-quick %s %s: %w", action, p.ifName, err)
+	}
+	return nil
 }
 
 func (p *Process) Start() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.cmd != nil && p.cmd.Process != nil && p.cmd.ProcessState == nil {
-		return errors.New("amneziawg is already running")
+	if p.interfaceExists(p.ifName) {
+		return fmt.Errorf("AmneziaWG interface %q already exists", p.ifName)
 	}
-	quick := os.Getenv("AMNEZIAWG_QUICK")
-	if quick == "" {
-		quick = "awg-quick"
+	if err := p.run("up"); err != nil {
+		return err
 	}
-	cmd := exec.Command(quick, "up", p.config)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if goImpl := os.Getenv("AMNEZIAWG_GO"); goImpl != "" {
-		cmd.Env = append(os.Environ(), "WG_QUICK_USERSPACE_IMPLEMENTATION="+goImpl)
+	p.active = true
+	if !p.interfaceExists(p.ifName) {
+		p.active = false
+		return fmt.Errorf("awg-quick returned success but interface %q was not created", p.ifName)
 	}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start %s: %w", quick, err)
-	}
-	p.cmd = cmd
-	go func() { _ = cmd.Wait() }()
 	return nil
 }
 
 func (p *Process) Stop() error {
 	p.mu.Lock()
-	cmd := p.cmd
-	p.mu.Unlock()
-	if cmd == nil || cmd.Process == nil || cmd.ProcessState != nil {
+	defer p.mu.Unlock()
+	if !p.active {
 		return nil
 	}
-	quick := os.Getenv("AMNEZIAWG_QUICK")
-	if quick == "" {
-		quick = "awg-quick"
-	}
-	down := exec.Command(quick, "down", p.config)
-	down.Stdout = os.Stdout
-	down.Stderr = os.Stderr
-	if err := down.Run(); err == nil {
+	if !p.interfaceExists(p.ifName) {
+		p.active = false
 		return nil
 	}
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if err := p.run("down"); err != nil {
 		return err
 	}
-	deadline := time.NewTimer(3 * time.Second)
-	defer deadline.Stop()
-	for {
-		if !p.Running() {
-			return nil
-		}
-		select {
-		case <-deadline.C:
-			return cmd.Process.Kill()
-		default:
-			time.Sleep(20 * time.Millisecond)
-		}
+	if p.interfaceExists(p.ifName) {
+		return errors.New("awg-quick returned success but the interface is still present")
 	}
-}
-
-func commandName() string {
-	name := os.Getenv("AMNEZIAWG_QUICK")
-	if strings.TrimSpace(name) == "" {
-		return "awg-quick"
-	}
-	return name
+	p.active = false
+	return nil
 }

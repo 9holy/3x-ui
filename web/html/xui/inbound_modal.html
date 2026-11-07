@@ -4,7 +4,12 @@
         :confirm-loading="inModal.confirmLoading" :closable="true" :mask-closable="false"
         :class="themeSwitcher.currentTheme"
         :ok-text="inModal.okText" cancel-text='{{ i18n "close" }}'>
-    {{template "form/inbound"}}
+    <a-tabs :active-key="inModal.activeKey" @change="inModal.changeTab">
+        <a-tab-pane key="form" tab="Form">{{template "form/inbound"}}</a-tab-pane>
+        <a-tab-pane key="json" tab="Protocol JSON">
+            <a-textarea v-model="inModal.jsonText" :rows="24" spellcheck="false"></a-textarea>
+        </a-tab-pane>
+    </a-tabs>
 </a-modal>
 <script>
 
@@ -14,13 +19,31 @@
         confirmLoading: false,
         okText: '{{ i18n "sure" }}',
         isEdit: false,
+        activeKey: 'form',
+        jsonText: '{}',
         confirm: null,
         inbound: new Inbound(),
         dbInbound: new DBInbound(),
         ok() {
-            ObjectUtil.execute(inModal.confirm, inModal.inbound, inModal.dbInbound);
+            try {
+                if (this.activeKey === 'json') this.inbound = Inbound.fromJson(ProtocolUtil.parse(this.jsonText, 'Inbound JSON'));
+                const stream = this.inbound.toJson().streamSettings;
+                if (['http', 'h2', 'quic'].includes(stream?.network)) throw new Error('旧 H2 / QUIC 传输已移除，请先手动迁移到 XHTTP stream-one (TLS ALPN h2 / h3)。');
+                if (stream?.network === 'kcp' && stream.kcpSettings?.seed === '') throw new Error('旧 mKCP 显式空 seed 不兼容，请设置非空 seed 并刷新客户端订阅。');
+                ObjectUtil.execute(this.confirm, this.inbound, this.dbInbound);
+            } catch (error) {
+                Vue.prototype.$message.error(error.message);
+            }
+        },
+        changeTab(key) {
+            try {
+                if (key === 'json') this.jsonText = JSON.stringify(this.inbound.toJson(), null, 2);
+                else this.inbound = Inbound.fromJson(ProtocolUtil.parse(this.jsonText, 'Inbound JSON'));
+                this.activeKey = key;
+            } catch (error) { Vue.prototype.$message.error(error.message); }
         },
         show({ title = '', okText = '{{ i18n "sure" }}', inbound = null, dbInbound = null, confirm = (inbound, dbInbound) => {}, isEdit = false }) {
+            this.activeKey = 'form';
             this.title = title;
             this.okText = okText;
             if (inbound) {
@@ -91,23 +114,14 @@
         },
         methods: {
             streamNetworkChange() {
-                if (!inModal.inbound.canEnableTls()) {
-                    this.inModal.inbound.stream.security = 'none';
-                }
-                if (!inModal.inbound.canEnableReality()) {
-                    this.inModal.inbound.reality = false;
-                }
-                if (this.inModal.inbound.protocol == Protocols.VLESS && !inModal.inbound.canEnableTlsFlow()) {
-                    this.inModal.inbound.settings.vlesses.forEach(client => {
-                        client.flow = "";
-                    });
-                }
-                if ((this.inModal.inbound.protocol == Protocols.VLESS || this.inModal.inbound.protocol == Protocols.TROJAN) && !inModal.inbound.xtls) {
-                    this.inModal.inbound.settings.vlesses.forEach(client => {
-                        client.flow = "";
-                    });
+                const inbound = inModal.inbound;
+                if (!inbound.canEnableTls()) inbound.stream.security = 'none';
+                if (inbound.stream.isReality && !inbound.canEnableReality()) inbound.stream.security = 'none';
+                if (inbound.protocol === Protocols.VLESS && !inbound.canEnableTlsFlow()) {
+                    inbound.settings.vlesses.forEach(client => { client.flow = ''; });
                 }
             },
+
             SSMethodChange() {
                 if (this.inModal.inbound.isSSMultiUser) {
                     if (this.inModal.inbound.settings.shadowsockses.length ==0){

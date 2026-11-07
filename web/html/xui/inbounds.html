@@ -529,7 +529,7 @@
               </template>
               <template slot="expandedRowRender" slot-scope="record">
                 <a-table
-                  :row-key="client => client.id"
+                  :row-key="client => getClientId(record.protocol, client)"
                   :columns="isMobile ? innerMobileColumns : innerColumns"
                   :data-source="getInboundClients(record)"
                   :pagination=pagination(getInboundClients(record))
@@ -732,7 +732,7 @@
                     to_inbound = dbInbound.toInbound()
                     this.inbounds.push(to_inbound);
                     this.dbInbounds.push(dbInbound);
-                    if ([Protocols.VMESS, Protocols.VLESS, Protocols.TROJAN, Protocols.SHADOWSOCKS].includes(inbound.protocol)) {
+                    if (dbInbound.isMultiUser()) {
                         if (dbInbound.isSS && (!to_inbound.isSSMultiUser)) {
                             continue;
                         }
@@ -795,7 +795,7 @@
                             const newInbound = new DBInbound(inbound);
                             const inboundSettings = JSON.parse(inbound.settings);
                             if (inboundSettings.hasOwnProperty('clients')) {
-                                const searchedSettings = { "clients": [] };
+                                const searchedSettings = { ...inboundSettings, clients: [] };
                                 inboundSettings.clients.forEach(client => {
                                     if (ObjectUtil.deepSearch(client, key)) {
                                         searchedSettings.clients.push(client);
@@ -819,7 +819,7 @@
                         if (this.clientCount[inbound.id] && this.clientCount[inbound.id].hasOwnProperty(this.filterBy)){
                             const list = this.clientCount[inbound.id][this.filterBy];
                             if (list.length > 0) {
-                                const filteredSettings = { "clients": [] };
+                                const filteredSettings = { ...inboundSettings, clients: [] };
                                 inboundSettings.clients.forEach(client => {
                                     if (list.includes(client.email)) {
                                         filteredSettings.clients.push(client);
@@ -1046,12 +1046,8 @@
                 });
             },
             findIndexOfClient(protocol, clients, client) {
-                switch (protocol) {
-                    case Protocols.TROJAN:
-                    case Protocols.SHADOWSOCKS:
-                        return clients.findIndex(item => item.password === client.password && item.email === client.email);
-                    default: return clients.findIndex(item => item.id === client.id && item.email === client.email);
-                }
+                const key = ProtocolUtil.clientKey(protocol, client);
+                return clients.findIndex(item => ProtocolUtil.clientKey(protocol, item) === key && item.email === client.email);
             },
             async addClient(clients, dbInboundId, modal) {
                 const data = {
@@ -1065,7 +1061,7 @@
                     id: dbInboundId,
                     settings: '{"clients": [' + client.toString() + ']}',
                 };
-                await this.submit(`/panel/inbound/updateClient/${clientId}`, data, clientModal);
+                await this.submit(`/panel/inbound/updateClient/${encodeURIComponent(clientId)}`, data, clientModal);
             },
             resetTraffic(dbInboundId) {
                 dbInbound = this.dbInbounds.find(row => row.id === dbInboundId);
@@ -1103,18 +1099,14 @@
                         class: themeSwitcher.currentTheme,
                         okText: '{{ i18n "delete"}}',
                         cancelText: '{{ i18n "cancel"}}',
-                        onOk: () => this.submit(`/panel/inbound/${dbInboundId}/delClient/${clientId}`),
+                        onOk: () => this.submit(`/panel/inbound/${dbInboundId}/delClient/${encodeURIComponent(clientId)}`),
                     });
                 } else {
-                    this.submit(`/panel/inbound/${dbInboundId}/delClient/${clientId}`);
+                    this.submit(`/panel/inbound/${dbInboundId}/delClient/${encodeURIComponent(clientId)}`);
                 }
             },
             getClientId(protocol, client) {
-                switch (protocol) {
-                    case Protocols.TROJAN: return client.password;
-                    case Protocols.SHADOWSOCKS: return client.email;
-                    default: return client.id;
-                }
+                return ProtocolUtil.clientKey(protocol, client);
             },
             checkFallback(dbInbound) {
                 newDbInbound = new DBInbound(dbInbound);

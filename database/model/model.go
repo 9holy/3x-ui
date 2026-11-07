@@ -1,7 +1,7 @@
 package model
 
 import (
-	"fmt"
+	"encoding/json"
 
 	"x-ui/util/json_util"
 	"x-ui/xray"
@@ -24,6 +24,8 @@ const (
 	MTProto     Protocol = "mtproto"
 	TUIC        Protocol = "tuic"
 	AmneziaWG   Protocol = "amneziawg"
+	Mixed       Protocol = "mixed"
+	Tunnel      Protocol = "tunnel"
 )
 
 type User struct {
@@ -72,14 +74,23 @@ type InboundClientIps struct {
 func (i *Inbound) GenXrayInboundConfig() *xray.InboundConfig {
 	listen := i.Listen
 	if listen != "" {
-		listen = fmt.Sprintf("\"%v\"", listen)
+		encoded, _ := json.Marshal(listen)
+		listen = string(encoded)
 	}
+	settings := coreProtocolSettings(i.Protocol, i.Settings)
+	stream := xray.NormalizeStreamSettings(i.StreamSettings)
+	if i.Protocol == Hysteria {
+		stream = hysteriaStreamSettings(stream)
+	} else if i.Protocol == Masque {
+		stream = masqueStreamSettings(stream)
+	}
+	stream = coreInboundStream(stream)
 	return &xray.InboundConfig{
 		Listen:         json_util.RawMessage(listen),
 		Port:           i.Port,
 		Protocol:       string(i.Protocol),
-		Settings:       json_util.RawMessage(i.Settings),
-		StreamSettings: json_util.RawMessage(i.StreamSettings),
+		Settings:       json_util.RawMessage(settings),
+		StreamSettings: json_util.RawMessage(stream),
 		Tag:            i.Tag,
 		Sniffing:       json_util.RawMessage(i.Sniffing),
 		Allocate:       json_util.RawMessage(i.Allocate),
@@ -97,6 +108,8 @@ type Client struct {
 	Security   string `json:"security"`
 	Password   string `json:"password"`
 	Secret     string `json:"secret"`
+	Auth       string `json:"auth"`
+	UUID       string `json:"uuid"`
 	Flow       string `json:"flow"`
 	Email      string `json:"email"`
 	LimitIP    int    `json:"limitIp"`

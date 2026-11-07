@@ -49,7 +49,7 @@ class DBInbound {
     }
 
     get isSocks() {
-        return this.protocol === Protocols.SOCKS;
+        return [Protocols.SOCKS, Protocols.MIXED].includes(this.protocol);
     }
 
     get isHTTP() {
@@ -90,7 +90,7 @@ class DBInbound {
     toInbound() {
         let settings = {};
         if (!ObjectUtil.isEmpty(this.settings)) {
-            settings = JSON.parse(this.settings);
+            settings = typeof this.settings === "string" ? JSON.parse(this.settings) : (this.settings.toJson ? this.settings.toJson() : this.settings);
         }
 
         let streamSettings = {};
@@ -122,6 +122,13 @@ class DBInbound {
             case Protocols.VLESS:
             case Protocols.TROJAN:
                 return true;
+            case Protocols.HYSTERIA:
+            case Protocols.MASQUE:
+            case Protocols.MTPROTO:
+            case Protocols.TUIC:
+                // Native users-map/secret formats remain editable as JSON;
+                // panel client dialogs require the panel's clients array.
+                return Array.isArray(this.toInbound().clients);
             case Protocols.SHADOWSOCKS:
                 return this.toInbound().isSSMultiUser;
             default:
@@ -130,11 +137,16 @@ class DBInbound {
     }
 
     hasLink() {
+        if (this.toInbound().network === 'xdrive') return false;
+        if ([Protocols.HYSTERIA, Protocols.TUIC, Protocols.MTPROTO].includes(this.protocol) && !this.isMultiUser()) return false;
         switch (this.protocol) {
             case Protocols.VMESS:
             case Protocols.VLESS:
             case Protocols.TROJAN:
             case Protocols.SHADOWSOCKS:
+            case Protocols.HYSTERIA:
+            case Protocols.TUIC:
+            case Protocols.MTPROTO:
                 return true;
             default:
                 return false;

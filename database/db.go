@@ -32,7 +32,6 @@ func initModels() error {
 		&model.OutboundTraffics{},
 		&model.Setting{},
 		&model.InboundClientIps{},
-		&model.Node{},
 		&xray.ClientTraffic{},
 	}
 	for _, model := range models {
