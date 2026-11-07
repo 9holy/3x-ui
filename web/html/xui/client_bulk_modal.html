@@ -91,10 +91,10 @@
                     <a-icon type="question-circle"></a-icon>
                 </a-tooltip>
             </template>
-            <a-input-number v-model="clientsBulkModal.totalGB" :min="0"></a-input-number>
+            <a-input-number v-model="clientsBulkModal.totalGB" :min="0" :disabled="inbound.protocol === Protocols.TUIC"></a-input-number>
         </a-form-item>
         <a-form-item label='{{ i18n "pages.client.delayedStart" }}'>
-            <a-switch v-model="clientsBulkModal.delayedStart" @click="clientsBulkModal.expiryTime=0"></a-switch>
+            <a-switch v-model="clientsBulkModal.delayedStart" :disabled="inbound.protocol === Protocols.TUIC" @click="clientsBulkModal.expiryTime=0"></a-switch>
         </a-form-item>
         <a-form-item label='{{ i18n "pages.client.expireDays" }}' v-if="clientsBulkModal.delayedStart">
             <a-input-number v-model.number="delayedExpireDays" :min="0"></a-input-number>
@@ -223,6 +223,10 @@
                 case Protocols.VLESS: return new Inbound.VLESSSettings.VLESS();
                 case Protocols.TROJAN: return new Inbound.TrojanSettings.Trojan();
                 case Protocols.SHADOWSOCKS: return new Inbound.ShadowsocksSettings.Shadowsocks(clientsBulkModal.inbound.settings.shadowsockses[0].method);
+                case Protocols.HYSTERIA:
+                case Protocols.MASQUE:
+                case Protocols.MTPROTO:
+                case Protocols.TUIC: return new Inbound.ProtocolClient(protocol);
                 default: return null;
             }
         },

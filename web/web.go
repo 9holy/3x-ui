@@ -382,13 +382,15 @@ func (s *Server) Start() (err error) {
 
 func (s *Server) Stop() error {
 	s.cancel()
+	// Wait for reconciliation jobs before stopping their processes. Otherwise
+	// an in-flight job can start a sidecar after StopAll has already returned.
+	if s.cron != nil {
+		<-s.cron.Stop().Done()
+	}
 	mtproto.GetManager().StopAll()
 	tuic.GetManager().StopAll()
 	amneziawg.GetManager().StopAll()
 	s.xrayService.StopXray()
-	if s.cron != nil {
-		s.cron.Stop()
-	}
 	if s.tgbotService.IsRunning() {
 		s.tgbotService.Stop()
 	}

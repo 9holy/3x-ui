@@ -34,7 +34,7 @@
               <a-tag color="green">[[ inbound.network ]]</a-tag>
             </td>
           </tr>
-          <template v-if="inbound.isTcp || inbound.isWs || inbound.isH2 || inbound.isHttpupgrade || inbound.isSplithttp">
+          <template v-if="inbound.isTcp || inbound.isWs || inbound.isH2 || inbound.isHttpupgrade || inbound.isSplithttp || inbound.isXhttp">
             <tr>
               <td>{{ i18n "host" }}</td>
               <td v-if="inbound.host">
@@ -284,7 +284,7 @@
           <code>[[ link.link ]]</code>
         </tr-info-row>
       </template>
-      <table v-if="inbound.protocol == Protocols.DOKODEMO" class="tr-info-table">
+      <table v-if="[Protocols.DOKODEMO, Protocols.TUNNEL].includes(inbound.protocol)" class="tr-info-table">
         <tr>
           <th>{{ i18n "pages.inbounds.targetAddress" }}</th>
           <th>{{ i18n "pages.inbounds.destinationPort" }}</th>

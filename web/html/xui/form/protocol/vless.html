@@ -18,7 +18,15 @@
     </table>
   </a-collapse-panel>
 </a-collapse>
-<template v-if="inbound.isTcp && !inbound.stream.isReality">
+<a-form :colon="false" :label-col="{ md: {span:8} }" :wrapper-col="{ md: {span:14} }">
+  <a-form-item label="VLESS Decryption">
+    <a-input v-model.trim="inbound.settings.decryption" placeholder="none / mlkem768x25519plus..."></a-input>
+  </a-form-item>
+  <a-form-item label="VLESS Encryption (client)">
+    <a-input v-model.trim="inbound.settings.encryption" placeholder="none / matching client encryption"></a-input>
+  </a-form-item>
+</a-form>
+<template v-if="inbound.isTcp && !inbound.stream.isReality && !ProtocolUtil.encrypted(inbound.settings)">
   <a-form :colon="false" :label-col="{ md: {span:8} }" :wrapper-col="{ md: {span:14} }">
     <a-form-item label="Fallbacks">
       <a-button icon="plus" type="primary" size="small" @click="inbound.settings.addFallback()"></a-button>

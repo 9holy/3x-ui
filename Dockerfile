@@ -1,10 +1,11 @@
 # ========================================================
 # Stage: Builder
 # ========================================================
-FROM golang:1.25-alpine AS builder
+FROM golang:1.23.1-alpine AS builder
 WORKDIR /app
 ENV PATH="/app/bin:${PATH}"
 ARG TARGETARCH
+ARG TARGETVARIANT
 
 RUN apk --no-cache --update add \
   build-base \
@@ -18,7 +19,7 @@ COPY . .
 ENV CGO_ENABLED=1
 ENV CGO_CFLAGS="-D_LARGEFILE64_SOURCE"
 RUN go build -o build/x-ui main.go
-RUN ./DockerInit.sh "$TARGETARCH"
+RUN ./DockerInit.sh "$TARGETARCH" "$TARGETVARIANT"
 
 # ========================================================
 # Stage: Final Image of 3x-ui
@@ -34,7 +35,8 @@ RUN apk add --no-cache --update \
   fail2ban \
   bash \
   iproute2 \
-  iptables
+  iptables \
+  openresolv
 
 COPY --from=builder /app/build/ /app/
 COPY --from=builder /app/DockerEntrypoint.sh /app/
