@@ -119,8 +119,11 @@ async function loadedInbound(id) {
             return inbound.toJson();
         }, {protocol, index, cert, key});
         await modal().getByRole('tab', {name: 'Protocol JSON', exact: true}).click();
-        await modal().locator('textarea:visible').fill(JSON.stringify(fixture));
+        await page.waitForFunction(() => inModal.activeKey === 'json');
+        await modal().locator('.ant-tabs-tabpane-active[role="tabpanel"]').locator('textarea').fill(JSON.stringify(fixture));
         await modal().getByRole('tab', {name: 'Form', exact: true}).click();
+        await page.waitForFunction(() => inModal.activeKey === 'form');
+        assert.equal(await page.evaluate(() => inModal.inbound.port), fixture.port, protocol + ' JSON tab applies fixture');
         await field('Remark').locator('input').fill(remark);
         await field('Enabled').getByRole('switch').click();
         const created = await saveModal('/panel/inbound/add');

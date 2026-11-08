@@ -1,10 +1,10 @@
 {{define "inboundModal"}}
 <a-modal id="inbound-modal" v-model="inModal.visible" :title="inModal.title"
-        :dialog-style="{ top: '20px' }" @ok="inModal.ok"
+        :dialog-style="{ top: '20px' }" @ok="inModal.ok()"
         :confirm-loading="inModal.confirmLoading" :closable="true" :mask-closable="false"
         :class="themeSwitcher.currentTheme"
         :ok-text="inModal.okText" cancel-text='{{ i18n "close" }}'>
-    <a-tabs :active-key="inModal.activeKey" @change="inModal.changeTab">
+    <a-tabs :active-key="inModal.activeKey" @change="inModal.changeTab($event)">
         <a-tab-pane key="form" tab="Form">{{template "form/inbound"}}</a-tab-pane>
         <a-tab-pane key="json" tab="Protocol JSON">
             <a-textarea v-model="inModal.jsonText" :rows="24" spellcheck="false"></a-textarea>

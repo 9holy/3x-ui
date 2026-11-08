@@ -162,7 +162,10 @@ test('served outbound modal supports new/import/edit and invalid JSON workflows'
     let tree = ui.render('out-modal');
     assert.ok(input(tree, 'secret:encoded'), 'HY2 auth form input');
     input(tree, 'secret:encoded').data.model.callback('edited:auth');
-    ui.run('var saved=null;outModal.confirm=wire=>{saved=wire;};outModal.ok();outModal.show({isEdit:true,outbound:saved});');
+    ui.run('var saved=null;outModal.confirm=wire=>{saved=wire;};');
+    Reflect.apply(ui.render('out-modal').data.on.ok, undefined, []);
+    assert.equal(ui.run('saved.streamSettings.hysteriaSettings.auth'), 'edited:auth');
+    ui.run('outModal.show({isEdit:true,outbound:saved});');
     tree = ui.render('out-modal');
     assert.ok(input(tree, 'edited:auth'));
     ui.run('outModal.toggleJson(true);outModal.cm.setValue("[]");');
@@ -191,15 +194,23 @@ test('served modal warnings prevent removed transports and explicit empty legacy
     }
 });
 
-test('all offered protocol forms render and preserve settings across JSON edits', {skip: !htmlDir}, () => {
+test('all offered protocol forms bind real tab/save events and preserve JSON edits', {skip: !htmlDir}, () => {
     const ui = runtime('inbounds', 'xray');
     const protocols = ui.run('Object.values(Protocols).filter(p => p !== Protocols.TUN)');
     for (const protocol of protocols) {
-        ui.run(`inModal.show({});inModal.inbound.protocol=${JSON.stringify(protocol)};`);
-        ui.render('inbound-modal');
-        ui.run('inModal.changeTab("json");inModal.changeTab("form");');
-        ui.render('inbound-modal');
-        assert.equal(ui.run('inModal.inbound.toJson().protocol'), protocol);
+        ui.run(`var submitted=null;inModal.show({confirm:inbound=>{submitted=inbound.toJson();}});inModal.inbound.protocol=${JSON.stringify(protocol)};`);
+        let tree = ui.render('inbound-modal');
+        // Vue invokes event callbacks without the plain modal object's receiver.
+        // Exercise the compiled template callback, not a direct model method call.
+        Reflect.apply(nodes(tree).find(node => node.tag === 'a-tabs').data.on.change, undefined, ['json']);
+        assert.equal(ui.run('inModal.activeKey'), 'json', `${protocol} real JSON tab event`);
+        ui.run('var wire=JSON.parse(inModal.jsonText);wire.port=54321;inModal.jsonText=JSON.stringify(wire);');
+        tree = ui.render('inbound-modal');
+        Reflect.apply(nodes(tree).find(node => node.tag === 'a-tabs').data.on.change, undefined, ['form']);
+        assert.equal(ui.run('inModal.activeKey'), 'form');
+        Reflect.apply(ui.render('inbound-modal').data.on.ok, undefined, []);
+        assert.equal(ui.run('submitted.protocol'), protocol, `${protocol} real save event`);
+        assert.equal(ui.run('submitted.port'), 54321);
     }
 });
 
