@@ -233,13 +233,15 @@ test('clone payload preserves runtime config and creates fresh customer credenti
     ui.run(`var savedClone;var cloneApp={${cloneMethod}${payloadMethod}async submit(url,data){savedClone=data;}};`);
     for (const protocol of ['hysteria','masque','mtproto','tuic']) {
         ui.run(`var original=new Inbound();original.protocol=${JSON.stringify(protocol)};var oldSettings=JSON.parse(original.rawSettingsText);oldSettings.certificate='/real/cert.pem';oldSettings.private_key='/real/key.pem';original.rawSettingsText=JSON.stringify(oldSettings);`);
-        await ui.run(`cloneApp.cloneInbound(original,new DBInbound({remark:'original',enable:false,up:123,down:456}));`);
+        ui.run(`var originalWire=original.toJson();var originalRecord=new DBInbound({protocol:original.protocol,settings:JSON.stringify(originalWire.settings),streamSettings:JSON.stringify(originalWire.streamSettings),allocate:JSON.stringify({strategy:'random',refresh:13,concurrency:2}),remark:'original',enable:false,up:123,down:456});original=originalRecord.toInbound();`);
+        await ui.run('cloneApp.cloneInbound(original,originalRecord);');
         assert.equal(ui.run('JSON.parse(savedClone.settings).certificate'), '/real/cert.pem');
         assert.equal(ui.run('JSON.parse(savedClone.settings).private_key'), '/real/key.pem');
         assert.notEqual(ui.run('JSON.parse(savedClone.settings).clients[0].email'), ui.run('oldSettings.clients[0].email'));
         assert.notEqual(ui.run('ProtocolUtil.clientKey(original.protocol,JSON.parse(savedClone.settings).clients[0])'), ui.run('ProtocolUtil.clientKey(original.protocol,oldSettings.clients[0])'));
         assert.equal(ui.run('savedClone.enable'), false);
         assert.equal(ui.run('savedClone.up + savedClone.down'), 0);
+        assert.deepEqual(JSON.parse(ui.run('savedClone.allocate')), {strategy: 'random', refresh: 13, concurrency: 2});
     }
     ui.run('var original=Inbound.fromJson({protocol:"amneziawg",settings:{interface:"old-awg",config:"[Interface]\\nPrivateKey = saved-private-key\\n"}});');
     await ui.run('cloneApp.cloneInbound(original,new DBInbound({remark:"awg",enable:false}));');

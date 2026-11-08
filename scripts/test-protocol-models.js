@@ -368,3 +368,12 @@ test('unlimited inbound expiry is not incorrectly displayed as expired', () => {
     assert.equal(incoming('new DBInbound({expiryTime:-86400000}).isExpiry'), false);
     assert.equal(incoming('new DBInbound({expiryTime:1}).isExpiry'), true);
 });
+
+test('database inbound reopening preserves non-default allocation settings', () => {
+    const allocate = {strategy: 'random', refresh: 13, concurrency: 2};
+    for (const protocol of ['vless', 'hysteria']) {
+        const wire = incoming(`new DBInbound({protocol:${JSON.stringify(protocol)},settings:'{"clients":[]}',allocate:${JSON.stringify(JSON.stringify(allocate))}}).toInbound().toJson()`);
+        assert.deepEqual(wire.allocate, allocate);
+    }
+    assert.deepEqual(incoming('new DBInbound({protocol:"vless",settings:"{}"}).toInbound().toJson().allocate'), {strategy: 'always', refresh: 5, concurrency: 3});
+});

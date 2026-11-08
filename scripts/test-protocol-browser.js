@@ -99,6 +99,7 @@ async function loadedInbound(id) {
         const fixture = await page.evaluate(({protocol, index, cert, key}) => {
             const inbound = new Inbound(); inbound.protocol = protocol;
             inbound.port = 32000 + index; inbound.listen = '127.0.0.1';
+            inbound.allocate = new Allocate('always', 13, 2);
             if ([Protocols.TUNNEL, Protocols.DOKODEMO].includes(protocol)) {
                 inbound.settings.address = '127.0.0.1'; inbound.settings.port = 8080; inbound.settings.network = 'tcp';
             }
@@ -131,12 +132,14 @@ async function loadedInbound(id) {
         const saved = await loadedInbound(created.obj.id);
         assert.equal(saved.enable, false, protocol + ' disabled state');
         assert.deepEqual(JSON.parse(saved.settings), fixture.settings, protocol + ' actual database settings');
+        assert.deepEqual(JSON.parse(saved.allocate), fixture.allocate, protocol + ' actual database allocation');
         await page.evaluate(id => app.openEditInbound(id), saved.id);
         await field('Port').locator('input').first().fill(String(33000 + index));
         await saveModal(`/panel/inbound/update/${saved.id}`);
         await page.waitForFunction(({id, port}) => app.dbInbounds.find(item => item.id === id)?.port === port, {id: saved.id, port: 33000 + index});
         const edited = await loadedInbound(saved.id);
         assert.deepEqual(JSON.parse(edited.settings), fixture.settings, protocol + ' edit preserves settings');
+        assert.deepEqual(JSON.parse(edited.allocate), fixture.allocate, protocol + ' edit preserves allocation');
         report.checks.push(`${protocol}: select, form/JSON round trip, create, edit, persisted settings and disabled state`);
         console.log('PASS: ' + report.checks.at(-1));
     }
