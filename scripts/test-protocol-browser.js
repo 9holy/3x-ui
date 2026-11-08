@@ -37,12 +37,13 @@ async function postResult(suffix, action) {
     return body;
 }
 const modal = () => page.locator('.ant-modal:visible').last();
-const field = label => modal().locator('.ant-form-item').filter({
+const field = label => modal().locator('.ant-form-item:visible').filter({
     has: page.locator('.ant-form-item-label').filter({hasText: label}),
 }).first();
 async function saveModal(endpoint) {
     const result = await postResult(endpoint, () => modal().locator('.ant-modal-footer .ant-btn-primary').click());
     await page.waitForFunction(() => !inModal.visible && !clientModal.visible);
+    await modal().waitFor({state: 'hidden'});
     return result;
 }
 async function loadedInbound(id) {
@@ -91,9 +92,10 @@ async function loadedInbound(id) {
     const ids = {};
     for (let index = 0; index < protocols.length; index++) {
         const protocol = protocols[index], remark = `browser-${protocol}`;
-        await page.getByRole('button', {name: 'Add Inbound', exact: true}).click();
+        // Ant Design includes the plus icon's aria-label in the button name.
+        await page.getByRole('button', {name: /\bAdd Inbound$/}).click();
         await field('Protocol').locator('.ant-select').click();
-        await page.locator('.ant-select-dropdown-menu-item:visible').filter({hasText: new RegExp(`^${protocol}$`)}).click();
+        await page.locator('.ant-select-dropdown-menu-item:visible').filter({hasText: new RegExp(`^\\s*${protocol}\\s*$`)}).click();
         const fixture = await page.evaluate(({protocol, index, cert, key}) => {
             const inbound = new Inbound(); inbound.protocol = protocol;
             inbound.port = 32000 + index; inbound.listen = '127.0.0.1';
@@ -133,6 +135,7 @@ async function loadedInbound(id) {
         const edited = await loadedInbound(saved.id);
         assert.deepEqual(JSON.parse(edited.settings), fixture.settings, protocol + ' edit preserves settings');
         report.checks.push(`${protocol}: select, form/JSON round trip, create, edit, persisted settings and disabled state`);
+        console.log('PASS: ' + report.checks.at(-1));
     }
     for (const protocol of ['vmess', 'vless', 'trojan', 'shadowsocks', 'hysteria', 'masque', 'mtproto', 'tuic']) {
         const id = ids[protocol], email = 'browser-client-' + protocol;
@@ -161,9 +164,11 @@ async function loadedInbound(id) {
         }, {id, email});
         await modal().waitFor({state: 'visible'});
         await modal().locator('.ant-modal-close').click();
+        await modal().waitFor({state: 'hidden'});
         await postResult(`/panel/inbound/${id}/delClient/${encodeURIComponent(clientKey)}`, () => page.evaluate(({id, client}) => app.delClient(id, client, false), {id, client}));
         await page.waitForFunction(({id, email}) => !JSON.parse(app.dbInbounds.find(item => item.id === id).settings).clients.some(client => client.email === email), {id, email});
         report.checks.push(`${protocol}: customer create, quota/delay availability, edit, disable, details, delete`);
+        console.log('PASS: ' + report.checks.at(-1));
     }
     await page.screenshot({path: path.join(artifacts, 'inbounds-desktop.png'), fullPage: true});
     await page.setViewportSize({width: 390, height: 844});
