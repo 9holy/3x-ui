@@ -4,14 +4,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"x-ui/amneziawg"
 	"x-ui/database"
 	"x-ui/database/model"
 	"x-ui/logger"
+	"x-ui/mtproto"
+	"x-ui/tuic"
 	"x-ui/util/common"
 	"x-ui/xray"
 
@@ -77,17 +81,161 @@ func (s *InboundService) checkPortExist(listen string, port int, ignoreId int) (
 }
 
 func (s *InboundService) GetClients(inbound *model.Inbound) ([]model.Client, error) {
-	settings := map[string][]model.Client{}
-	json.Unmarshal([]byte(inbound.Settings), &settings)
-	if settings == nil {
-		return nil, fmt.Errorf("setting is null")
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(inbound.Settings), &settings); err != nil || settings == nil {
+		return nil, fmt.Errorf("settings must be a JSON object")
 	}
-
-	clients := settings["clients"]
-	if clients == nil {
+	raw, exists := settings["clients"]
+	if !exists {
 		return nil, nil
 	}
+	var clients []model.Client
+	if err := json.Unmarshal(raw, &clients); err != nil {
+		return nil, fmt.Errorf("invalid clients: %w", err)
+	}
+	var aliases []struct {
+		Pass   string `json:"pass"`
+		Enable *bool  `json:"enable"`
+	}
+	_ = json.Unmarshal(raw, &aliases)
+	for i := range clients {
+		if clients[i].ID == "" {
+			clients[i].ID = clients[i].UUID
+		}
+		if clients[i].Password == "" {
+			clients[i].Password = aliases[i].Pass
+		}
+		if clients[i].Auth == "" && inbound.Protocol == model.Hysteria {
+			clients[i].Auth = clients[i].Password
+			if clients[i].Auth == "" {
+				clients[i].Auth = clients[i].Secret
+			}
+		}
+		if aliases[i].Enable == nil && (isSidecarProtocol(inbound.Protocol) || inbound.Protocol == model.Hysteria || inbound.Protocol == model.Masque) {
+			clients[i].Enable = true
+		}
+	}
 	return clients, nil
+}
+
+func validateProtocolSettings(inbound *model.Inbound) error {
+	switch inbound.Protocol {
+	case model.MTProto:
+		return mtproto.ValidateInbound(inbound)
+	case model.TUIC:
+		return tuic.ValidateSettings(inbound)
+	case model.AmneziaWG:
+		return amneziawg.ValidateSettings(inbound)
+	}
+	var settings, stream map[string]interface{}
+	if err := json.Unmarshal([]byte(inbound.Settings), &settings); err != nil || settings == nil {
+		return common.NewError("settings must be a JSON object")
+	}
+	if inbound.StreamSettings != "" {
+		if err := json.Unmarshal([]byte(inbound.StreamSettings), &stream); err != nil || stream == nil {
+			return common.NewError("streamSettings must be a JSON object")
+		}
+	}
+	if !inbound.Enable {
+		return nil
+	}
+	if err := xray.CheckLegacyStreamSettings(inbound.StreamSettings); err != nil {
+		return err
+	}
+	modern := inbound.Protocol == model.Hysteria || inbound.Protocol == model.Masque || inbound.Protocol == model.Tun
+	if network, _ := stream["network"].(string); network == "xhttp" || network == "splithttp" || network == "xdrive" || network == "hysteria" {
+		modern = true
+	}
+	if _, ok := stream["finalmask"]; ok {
+		modern = true
+	}
+	for _, field := range []string{"encryption", "decryption"} {
+		if value, _ := settings[field].(string); inbound.Protocol == model.VLESS && value != "" && value != "none" {
+			modern = true
+		}
+	}
+	// A legacy configuration may be provisioned before its runtime is installed.
+	// New protocol formats must be checked by the installed native core, since
+	// the panel's older linked Xray library does not understand them.
+	if _, err := os.Stat(xray.GetBinaryPath()); errors.Is(err, os.ErrNotExist) && !modern {
+		return nil
+	}
+	encoded, err := json.Marshal(inbound.GenXrayInboundConfig())
+	if err != nil {
+		return err
+	}
+	return xray.ValidateInboundConfig(encoded)
+}
+
+func validateClientCredentials(protocol model.Protocol, clients []model.Client) error {
+	for _, client := range clients {
+		switch protocol {
+		case model.MTProto:
+			if client.Email == "" || !mtproto.ValidSecret(client.Secret) {
+				return common.NewError("MTProto client requires an email and valid FakeTLS secret")
+			}
+		case model.TUIC:
+			if client.Email == "" || client.ID == "" || client.Password == "" {
+				return common.NewError("TUIC client requires email, UUID and password")
+			}
+		case model.Hysteria:
+			if client.Auth == "" && client.Password == "" && client.Secret == "" {
+				return common.NewError("Hysteria2 client requires auth")
+			}
+		case model.Masque, model.Trojan:
+			if client.Password == "" {
+				return common.NewError("empty client password")
+			}
+		case model.Shadowsocks:
+			if client.Email == "" {
+				return common.NewError("empty client email")
+			}
+		case model.AmneziaWG:
+			return common.NewError("AmneziaWG peers must be edited in the native config")
+		default:
+			if client.ID == "" {
+				return common.NewError("empty client ID")
+			}
+		}
+	}
+	return nil
+}
+
+func clientIdentifier(protocol model.Protocol, client model.Client) string {
+	switch protocol {
+	case model.MTProto, model.TUIC, model.AmneziaWG, model.Shadowsocks:
+		return client.Email
+	case model.Trojan, model.Masque:
+		return client.Password
+	case model.Hysteria:
+		if client.Auth != "" {
+			return client.Auth
+		}
+		if client.Password != "" {
+			return client.Password
+		}
+		return client.Secret
+	default:
+		if client.ID != "" {
+			return client.ID
+		}
+		return client.UUID
+	}
+}
+
+func rawClientIdentifier(protocol model.Protocol, client map[string]interface{}) string {
+	encoded, err := json.Marshal(client)
+	if err != nil {
+		return ""
+	}
+	var value model.Client
+	if json.Unmarshal(encoded, &value) != nil {
+		return ""
+	}
+	if value.Password == "" {
+		value.Password, _ = client["pass"].(string)
+	}
+	return clientIdentifier(protocol, value)
 }
 
 func (s *InboundService) getAllEmails() ([]string, error) {
@@ -158,6 +306,9 @@ func (s *InboundService) checkEmailExistForInbound(inbound *model.Inbound) (stri
 }
 
 func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, bool, error) {
+	if err := validateProtocolSettings(inbound); err != nil {
+		return inbound, false, err
+	}
 	exist, err := s.checkPortExist(inbound.Listen, inbound.Port, 0)
 	if err != nil {
 		return inbound, false, err
@@ -179,51 +330,33 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 		return inbound, false, err
 	}
 
-	// Secure client ID
-	for _, client := range clients {
-		if isSidecarProtocol(inbound.Protocol) {
-			if client.Email == "" || (client.Secret == "" && client.ID == "" && client.Password == "") {
-				return inbound, false, common.NewError("empty client secret")
-			}
-		} else if inbound.Protocol == "trojan" {
-			if client.Password == "" {
-				return inbound, false, common.NewError("empty client ID")
-			}
-		} else if inbound.Protocol == "shadowsocks" {
-			if client.Email == "" {
-				return inbound, false, common.NewError("empty client ID")
-			}
-		} else {
-			if client.ID == "" {
-				return inbound, false, common.NewError("empty client ID")
-			}
-		}
+	if err := validateClientCredentials(inbound.Protocol, clients); err != nil {
+		return inbound, false, err
 	}
 
 	db := database.GetDB()
 	tx := db.Begin()
-	defer func() {
-		if err == nil {
-			tx.Commit()
-		} else {
-			tx.Rollback()
-		}
-	}()
+	defer tx.Rollback()
 
 	err = tx.Save(inbound).Error
 	if err == nil {
 		if len(inbound.ClientStats) == 0 {
 			for _, client := range clients {
-				s.AddClientStat(tx, inbound.Id, &client)
+				if err = s.AddClientStat(tx, inbound.Id, &client); err != nil {
+					return inbound, false, err
+				}
 			}
 		}
 	} else {
 		return inbound, false, err
 	}
+	if err = tx.Commit().Error; err != nil {
+		return inbound, false, err
+	}
 
 	needRestart := false
-	if inbound.Enable && !isSidecarProtocol(inbound.Protocol) {
-		s.xrayApi.Init(p.GetAPIPort())
+	if inbound.Enable && !isSidecarProtocol(inbound.Protocol) && p != nil {
+		s.xrayApi.Init(currentXrayProcess().GetAPIPort())
 		inboundJson, err1 := json.MarshalIndent(inbound.GenXrayInboundConfig(), "", "  ")
 		if err1 != nil {
 			logger.Debug("Unable to marshal inbound config:", err1)
@@ -237,6 +370,8 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 			needRestart = true
 		}
 		s.xrayApi.Close()
+	} else if inbound.Enable && !isSidecarProtocol(inbound.Protocol) {
+		needRestart = true
 	}
 
 	return inbound, needRestart, err
@@ -250,8 +385,8 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 	needRestart := false
 	result := db.Model(model.Inbound{}).Select("tag").Where("id = ? and enable = ?", id, true).First(&tag)
 	db.Model(model.Inbound{}).Select("protocol").Where("id = ?", id).Scan(&protocol)
-	if result.Error == nil && !isSidecarProtocol(protocol) {
-		s.xrayApi.Init(p.GetAPIPort())
+	if result.Error == nil && !isSidecarProtocol(protocol) && p != nil {
+		s.xrayApi.Init(currentXrayProcess().GetAPIPort())
 		err1 := s.xrayApi.DelInbound(tag)
 		if err1 == nil {
 			logger.Debug("Inbound deleted by api:", tag)
@@ -298,6 +433,16 @@ func (s *InboundService) GetInbound(id int) (*model.Inbound, error) {
 }
 
 func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, bool, error) {
+	if err := validateProtocolSettings(inbound); err != nil {
+		return inbound, false, err
+	}
+	clients, err := s.GetClients(inbound)
+	if err != nil {
+		return inbound, false, err
+	}
+	if err := validateClientCredentials(inbound.Protocol, clients); err != nil {
+		return inbound, false, err
+	}
 	exist, err := s.checkPortExist(inbound.Listen, inbound.Port, inbound.Id)
 	if err != nil {
 		return inbound, false, err
@@ -312,17 +457,12 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	}
 
 	tag := oldInbound.Tag
+	oldProtocol, oldEnabled := oldInbound.Protocol, oldInbound.Enable
 
 	db := database.GetDB()
 	tx := db.Begin()
 
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		} else {
-			tx.Commit()
-		}
-	}()
+	defer tx.Rollback()
 
 	err = s.updateClientTraffics(tx, oldInbound, inbound)
 	if err != nil {
@@ -347,15 +487,26 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	} else {
 		oldInbound.Tag = fmt.Sprintf("inbound-%v:%v", inbound.Listen, inbound.Port)
 	}
+	if err = tx.Save(oldInbound).Error; err != nil {
+		return inbound, false, err
+	}
+	if err = tx.Commit().Error; err != nil {
+		return inbound, false, err
+	}
 
 	needRestart := false
-	if !isSidecarProtocol(oldInbound.Protocol) {
-		s.xrayApi.Init(p.GetAPIPort())
-		if s.xrayApi.DelInbound(tag) == nil {
+	usesAPI := p != nil && ((!isSidecarProtocol(oldProtocol) && oldEnabled) || (!isSidecarProtocol(inbound.Protocol) && inbound.Enable))
+	if usesAPI {
+		s.xrayApi.Init(currentXrayProcess().GetAPIPort())
+	}
+	if usesAPI && !isSidecarProtocol(oldProtocol) && oldEnabled {
+		if err := s.xrayApi.DelInbound(tag); err == nil {
 			logger.Debug("Old inbound deleted by api:", tag)
+		} else {
+			needRestart = true
 		}
 	}
-	if inbound.Enable && !isSidecarProtocol(oldInbound.Protocol) {
+	if usesAPI && inbound.Enable && !isSidecarProtocol(inbound.Protocol) {
 		inboundJson, err2 := json.MarshalIndent(oldInbound.GenXrayInboundConfig(), "", "  ")
 		if err2 != nil {
 			logger.Debug("Unable to marshal updated inbound config:", err2)
@@ -370,11 +521,13 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 			}
 		}
 	}
-	if !isSidecarProtocol(oldInbound.Protocol) {
+	if usesAPI {
 		s.xrayApi.Close()
+	} else if !isSidecarProtocol(inbound.Protocol) && inbound.Enable {
+		needRestart = true
 	}
 
-	return inbound, needRestart, tx.Save(oldInbound).Error
+	return inbound, needRestart, nil
 }
 
 func (s *InboundService) updateClientTraffics(tx *gorm.DB, oldInbound *model.Inbound, newInbound *model.Inbound) error {
@@ -417,6 +570,12 @@ func (s *InboundService) updateClientTraffics(tx *gorm.DB, oldInbound *model.Inb
 			if err != nil {
 				return err
 			}
+		} else if isSidecarProtocol(newInbound.Protocol) || newInbound.Protocol == model.Hysteria || newInbound.Protocol == model.Masque {
+			// Raw-protocol clients are edited through the full inbound form;
+			// their limits/expiry must stay in sync with client_traffics.
+			if err := s.UpdateClientStat(tx, newClient.Email, &newClient); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -426,6 +585,9 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 	clients, err := s.GetClients(data)
 	if err != nil {
 		return false, err
+	}
+	if len(clients) == 0 {
+		return false, common.NewError("at least one client is required")
 	}
 
 	email := clients[0].Email
@@ -440,7 +602,10 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 		return false, err
 	}
 
-	interfaceClients := settings["clients"].([]interface{})
+	interfaceClients, ok := settings["clients"].([]interface{})
+	if !ok {
+		return false, common.NewError("clients must be an array")
+	}
 	existEmail, err := s.checkEmailsExistForClients(clients)
 	if err != nil {
 		return false, err
@@ -454,21 +619,8 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 		return false, err
 	}
 
-	// Secure client ID
-	for _, client := range clients {
-		if oldInbound.Protocol == "trojan" {
-			if client.Password == "" {
-				return false, common.NewError("empty client ID")
-			}
-		} else if oldInbound.Protocol == "shadowsocks" {
-			if client.Email == "" {
-				return false, common.NewError("empty client ID")
-			}
-		} else {
-			if client.ID == "" {
-				return false, common.NewError("empty client ID")
-			}
-		}
+	if err := validateClientCredentials(oldInbound.Protocol, clients); err != nil {
+		return false, err
 	}
 
 	var oldSettings map[string]interface{}
@@ -477,7 +629,10 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 		return false, err
 	}
 
-	oldClients := oldSettings["clients"].([]interface{})
+	oldClients, ok := oldSettings["clients"].([]interface{})
+	if !ok {
+		return false, common.NewError("this inbound must be edited through its full settings")
+	}
 	oldClients = append(oldClients, interfaceClients...)
 
 	oldSettings["clients"] = oldClients
@@ -488,26 +643,36 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 	}
 
 	oldInbound.Settings = string(newSettings)
+	if err := validateProtocolSettings(oldInbound); err != nil {
+		return false, err
+	}
 
 	db := database.GetDB()
 	tx := db.Begin()
 
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		} else {
-			tx.Commit()
+	defer tx.Rollback()
+
+	for _, client := range clients {
+		if client.Email != "" {
+			if err = s.AddClientStat(tx, data.Id, &client); err != nil {
+				return false, err
+			}
 		}
-	}()
+	}
+	if err = tx.Save(oldInbound).Error; err != nil {
+		return false, err
+	}
+	if err = tx.Commit().Error; err != nil {
+		return false, err
+	}
 
 	needRestart := false
-	if !isSidecarProtocol(oldInbound.Protocol) {
-		s.xrayApi.Init(p.GetAPIPort())
+	if !isSidecarProtocol(oldInbound.Protocol) && p != nil {
+		s.xrayApi.Init(currentXrayProcess().GetAPIPort())
 	}
 	for _, client := range clients {
 		if len(client.Email) > 0 {
-			s.AddClientStat(tx, data.Id, &client)
-			if client.Enable && !isSidecarProtocol(oldInbound.Protocol) {
+			if client.Enable && !isSidecarProtocol(oldInbound.Protocol) && p != nil {
 				cipher := ""
 				if oldInbound.Protocol == "shadowsocks" {
 					cipher = oldSettings["method"].(string)
@@ -526,16 +691,18 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 					logger.Debug("Error in adding client by api:", err1)
 					needRestart = true
 				}
+			} else if client.Enable && !isSidecarProtocol(oldInbound.Protocol) {
+				needRestart = true
 			}
 		} else {
 			needRestart = true
 		}
 	}
-	if !isSidecarProtocol(oldInbound.Protocol) {
+	if !isSidecarProtocol(oldInbound.Protocol) && p != nil {
 		s.xrayApi.Close()
 	}
 
-	return needRestart, tx.Save(oldInbound).Error
+	return needRestart, nil
 }
 
 func (s *InboundService) DelInboundClient(inboundId int, clientId string) (bool, error) {
@@ -551,28 +718,29 @@ func (s *InboundService) DelInboundClient(inboundId int, clientId string) (bool,
 	}
 
 	email := ""
-	client_key := "id"
-	if isSidecarProtocol(oldInbound.Protocol) {
-		client_key = "email"
-	} else if oldInbound.Protocol == "trojan" {
-		client_key = "password"
+	interfaceClients, ok := settings["clients"].([]interface{})
+	if !ok {
+		return false, common.NewError("this inbound must be edited through its full settings")
 	}
-	if oldInbound.Protocol == "shadowsocks" {
-		client_key = "email"
-	}
-
-	interfaceClients := settings["clients"].([]interface{})
 	var newClients []interface{}
 	needApiDel := false
+	foundClient := false
 	for _, client := range interfaceClients {
-		c := client.(map[string]interface{})
-		c_id := c[client_key].(string)
+		c, ok := client.(map[string]interface{})
+		if !ok {
+			return false, common.NewError("invalid client object")
+		}
+		c_id := rawClientIdentifier(oldInbound.Protocol, c)
 		if c_id == clientId {
+			foundClient = true
 			email, _ = c["email"].(string)
-			needApiDel, _ = c["enable"].(bool)
+			needApiDel = c["enable"] != false
 		} else {
 			newClients = append(newClients, client)
 		}
+	}
+	if !foundClient {
+		return false, common.NewError("client not found")
 	}
 
 	if len(newClients) == 0 {
@@ -608,8 +776,8 @@ func (s *InboundService) DelInboundClient(inboundId int, clientId string) (bool,
 			logger.Error("Delete stats Data Error")
 			return false, err
 		}
-		if needApiDel && notDepleted && !isSidecarProtocol(oldInbound.Protocol) {
-			s.xrayApi.Init(p.GetAPIPort())
+		if needApiDel && notDepleted && !isSidecarProtocol(oldInbound.Protocol) && p != nil {
+			s.xrayApi.Init(currentXrayProcess().GetAPIPort())
 			err1 := s.xrayApi.RemoveUser(oldInbound.Tag, email)
 			if err1 == nil {
 				logger.Debug("Client deleted by api:", email)
@@ -629,6 +797,9 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 	if err != nil {
 		return false, err
 	}
+	if len(clients) != 1 {
+		return false, common.NewError("exactly one client is required")
+	}
 
 	email := clients[0].Email
 	valid, err := validateEmail(email)
@@ -642,10 +813,16 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 		return false, err
 	}
 
-	interfaceClients := settings["clients"].([]interface{})
+	interfaceClients, ok := settings["clients"].([]interface{})
+	if !ok {
+		return false, common.NewError("clients must be an array")
+	}
 
 	oldInbound, err := s.GetInbound(data.Id)
 	if err != nil {
+		return false, err
+	}
+	if err := validateClientCredentials(oldInbound.Protocol, clients); err != nil {
 		return false, err
 	}
 
@@ -658,20 +835,8 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 	newClientId := ""
 	clientIndex := -1
 	for index, oldClient := range oldClients {
-		oldClientId := ""
-		if isSidecarProtocol(oldInbound.Protocol) {
-			oldClientId = oldClient.Email
-			newClientId = clients[0].Email
-		} else if oldInbound.Protocol == "trojan" {
-			oldClientId = oldClient.Password
-			newClientId = clients[0].Password
-		} else if oldInbound.Protocol == "shadowsocks" {
-			oldClientId = oldClient.Email
-			newClientId = clients[0].Email
-		} else {
-			oldClientId = oldClient.ID
-			newClientId = clients[0].ID
-		}
+		oldClientId := clientIdentifier(oldInbound.Protocol, oldClient)
+		newClientId = clientIdentifier(oldInbound.Protocol, clients[0])
 		if clientId == oldClientId {
 			oldEmail = oldClient.Email
 			clientIndex = index
@@ -699,7 +864,10 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 	if err != nil {
 		return false, err
 	}
-	settingsClients := oldSettings["clients"].([]interface{})
+	settingsClients, ok := oldSettings["clients"].([]interface{})
+	if !ok || clientIndex >= len(settingsClients) {
+		return false, common.NewError("invalid clients")
+	}
 	settingsClients[clientIndex] = interfaceClients[0]
 	oldSettings["clients"] = settingsClients
 
@@ -709,16 +877,13 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 	}
 
 	oldInbound.Settings = string(newSettings)
+	if err := validateProtocolSettings(oldInbound); err != nil {
+		return false, err
+	}
 	db := database.GetDB()
 	tx := db.Begin()
 
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		} else {
-			tx.Commit()
-		}
-	}()
+	defer tx.Rollback()
 
 	if len(clients[0].Email) > 0 {
 		if len(oldEmail) > 0 {
@@ -731,7 +896,9 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 				return false, err
 			}
 		} else {
-			s.AddClientStat(tx, data.Id, &clients[0])
+			if err = s.AddClientStat(tx, data.Id, &clients[0]); err != nil {
+				return false, err
+			}
 		}
 	} else {
 		err = s.DelClientStat(tx, oldEmail)
@@ -743,9 +910,15 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 			return false, err
 		}
 	}
+	if err = tx.Save(oldInbound).Error; err != nil {
+		return false, err
+	}
+	if err = tx.Commit().Error; err != nil {
+		return false, err
+	}
 	needRestart := false
-	if len(oldEmail) > 0 && !isSidecarProtocol(oldInbound.Protocol) {
-		s.xrayApi.Init(p.GetAPIPort())
+	if len(oldEmail) > 0 && !isSidecarProtocol(oldInbound.Protocol) && p != nil {
+		s.xrayApi.Init(currentXrayProcess().GetAPIPort())
 		if oldClients[clientIndex].Enable {
 			err1 := s.xrayApi.RemoveUser(oldInbound.Tag, oldEmail)
 			if err1 == nil {
@@ -776,25 +949,21 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 			}
 		}
 		s.xrayApi.Close()
-	} else {
+	} else if !isSidecarProtocol(oldInbound.Protocol) {
 		logger.Debug("Client old email not found")
 		needRestart = true
 	}
-	return needRestart, tx.Save(oldInbound).Error
+	return needRestart, nil
 }
 
 func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (error, bool) {
 	var err error
 	db := database.GetDB()
 	tx := db.Begin()
-
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		} else {
-			tx.Commit()
-		}
-	}()
+	if tx.Error != nil {
+		return tx.Error, false
+	}
+	defer tx.Rollback()
 	err = s.addInboundTraffic(tx, inboundTraffics)
 	if err != nil {
 		return err, false
@@ -807,6 +976,7 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 	needRestart0, count, err := s.autoRenewClients(tx)
 	if err != nil {
 		logger.Warning("Error in renew clients:", err)
+		return err, false
 	} else if count > 0 {
 		logger.Debugf("%v clients renewed", count)
 	}
@@ -814,6 +984,7 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 	needRestart1, count, err := s.disableInvalidClients(tx)
 	if err != nil {
 		logger.Warning("Error in disabling invalid clients:", err)
+		return err, false
 	} else if count > 0 {
 		logger.Debugf("%v clients disabled", count)
 	}
@@ -821,10 +992,11 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 	needRestart2, count, err := s.disableInvalidInbounds(tx)
 	if err != nil {
 		logger.Warning("Error in disabling invalid inbounds:", err)
+		return err, false
 	} else if count > 0 {
 		logger.Debugf("%v inbounds disabled", count)
 	}
-	return nil, (needRestart0 || needRestart1 || needRestart2)
+	return tx.Commit().Error, (needRestart0 || needRestart1 || needRestart2)
 }
 
 func (s *InboundService) addInboundTraffic(tx *gorm.DB, traffics []*xray.Traffic) error {
@@ -853,7 +1025,7 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 	if len(traffics) == 0 {
 		// Empty onlineUsers
 		if p != nil {
-			p.SetOnlineClients(nil)
+			currentXrayProcess().SetOnlineClients(nil)
 		}
 		return nil
 	}
@@ -896,7 +1068,9 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 	}
 
 	// Set onlineUsers
-	p.SetOnlineClients(onlineClients)
+	if p != nil {
+		currentXrayProcess().SetOnlineClients(onlineClients)
+	}
 
 	err = tx.Save(dbClientTraffics).Error
 	if err != nil {
@@ -1039,11 +1213,14 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 		return false, 0, err
 	}
 	if p != nil {
-		err1 = s.xrayApi.Init(p.GetAPIPort())
+		err1 = s.xrayApi.Init(currentXrayProcess().GetAPIPort())
 		if err1 != nil {
 			return true, int64(len(traffics)), nil
 		}
 		for _, clientToAdd := range clientsToAdd {
+			if isSidecarProtocol(model.Protocol(clientToAdd.protocol)) {
+				continue
+			}
 			err1 = s.xrayApi.AddUser(clientToAdd.protocol, clientToAdd.tag, clientToAdd.client)
 			if err1 != nil {
 				needRestart = true
@@ -1062,12 +1239,13 @@ func (s *InboundService) disableInvalidInbounds(tx *gorm.DB) (bool, int64, error
 		var tags []string
 		err := tx.Table("inbounds").
 			Select("inbounds.tag").
+			Where("protocol NOT IN ?", []model.Protocol{model.MTProto, model.TUIC, model.AmneziaWG}).
 			Where("((total > 0 and up + down >= total) or (expiry_time > 0 and expiry_time <= ?)) and enable = ?", now, true).
 			Scan(&tags).Error
 		if err != nil {
 			return false, 0, err
 		}
-		s.xrayApi.Init(p.GetAPIPort())
+		s.xrayApi.Init(currentXrayProcess().GetAPIPort())
 		for _, tag := range tags {
 			err1 := s.xrayApi.DelInbound(tag)
 			if err1 == nil {
@@ -1101,12 +1279,13 @@ func (s *InboundService) disableInvalidClients(tx *gorm.DB) (bool, int64, error)
 		err := tx.Table("inbounds").
 			Select("inbounds.tag, client_traffics.email").
 			Joins("JOIN client_traffics ON inbounds.id = client_traffics.inbound_id").
+			Where("inbounds.protocol NOT IN ?", []model.Protocol{model.MTProto, model.TUIC, model.AmneziaWG}).
 			Where("((client_traffics.total > 0 AND client_traffics.up + client_traffics.down >= client_traffics.total) OR (client_traffics.expiry_time > 0 AND client_traffics.expiry_time <= ?)) AND client_traffics.enable = ?", now, true).
 			Scan(&results).Error
 		if err != nil {
 			return false, 0, err
 		}
-		s.xrayApi.Init(p.GetAPIPort())
+		s.xrayApi.Init(currentXrayProcess().GetAPIPort())
 		for _, result := range results {
 			err1 := s.xrayApi.RemoveUser(result.Tag, result.Email)
 			if err1 == nil {
@@ -1263,13 +1442,7 @@ func (s *InboundService) SetClientTelegramUserID(trafficId int, tgId int64) (boo
 
 	for _, oldClient := range oldClients {
 		if oldClient.Email == clientEmail {
-			if inbound.Protocol == "trojan" {
-				clientId = oldClient.Password
-			} else if inbound.Protocol == "shadowsocks" {
-				clientId = oldClient.Email
-			} else {
-				clientId = oldClient.ID
-			}
+			clientId = clientIdentifier(inbound.Protocol, oldClient)
 			break
 		}
 	}
@@ -1347,13 +1520,7 @@ func (s *InboundService) ToggleClientEnableByEmail(clientEmail string) (bool, bo
 
 	for _, oldClient := range oldClients {
 		if oldClient.Email == clientEmail {
-			if inbound.Protocol == "trojan" {
-				clientId = oldClient.Password
-			} else if inbound.Protocol == "shadowsocks" {
-				clientId = oldClient.Email
-			} else {
-				clientId = oldClient.ID
-			}
+			clientId = clientIdentifier(inbound.Protocol, oldClient)
 			clientOldEnabled = oldClient.Enable
 			break
 		}
@@ -1410,13 +1577,7 @@ func (s *InboundService) ResetClientIpLimitByEmail(clientEmail string, count int
 
 	for _, oldClient := range oldClients {
 		if oldClient.Email == clientEmail {
-			if inbound.Protocol == "trojan" {
-				clientId = oldClient.Password
-			} else if inbound.Protocol == "shadowsocks" {
-				clientId = oldClient.Email
-			} else {
-				clientId = oldClient.ID
-			}
+			clientId = clientIdentifier(inbound.Protocol, oldClient)
 			break
 		}
 	}
@@ -1467,13 +1628,7 @@ func (s *InboundService) ResetClientExpiryTimeByEmail(clientEmail string, expiry
 
 	for _, oldClient := range oldClients {
 		if oldClient.Email == clientEmail {
-			if inbound.Protocol == "trojan" {
-				clientId = oldClient.Password
-			} else if inbound.Protocol == "shadowsocks" {
-				clientId = oldClient.Email
-			} else {
-				clientId = oldClient.ID
-			}
+			clientId = clientIdentifier(inbound.Protocol, oldClient)
 			break
 		}
 	}
@@ -1527,13 +1682,7 @@ func (s *InboundService) ResetClientTrafficLimitByEmail(clientEmail string, tota
 
 	for _, oldClient := range oldClients {
 		if oldClient.Email == clientEmail {
-			if inbound.Protocol == "trojan" {
-				clientId = oldClient.Password
-			} else if inbound.Protocol == "shadowsocks" {
-				clientId = oldClient.Email
-			} else {
-				clientId = oldClient.ID
-			}
+			clientId = clientIdentifier(inbound.Protocol, oldClient)
 			break
 		}
 	}
@@ -1599,7 +1748,14 @@ func (s *InboundService) ResetClientTraffic(id int, clientEmail string) (bool, e
 		}
 		for _, client := range clients {
 			if client.Email == clientEmail {
-				s.xrayApi.Init(p.GetAPIPort())
+				if isSidecarProtocol(inbound.Protocol) {
+					break
+				}
+				if p == nil {
+					needRestart = true
+					break
+				}
+				s.xrayApi.Init(currentXrayProcess().GetAPIPort())
 				cipher := ""
 				if string(inbound.Protocol) == "shadowsocks" {
 					var oldSettings map[string]interface{}
@@ -2043,7 +2199,7 @@ func (s *InboundService) MigrateDB() {
 }
 
 func (s *InboundService) GetOnlineClients() []string {
-	return p.GetOnlineClients()
+	return currentXrayProcess().GetOnlineClients()
 }
 
 func validateEmail(email string) (bool, error) {

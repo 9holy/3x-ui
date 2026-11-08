@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 
 	"x-ui/database/model"
@@ -14,10 +15,16 @@ import (
 
 var (
 	p                 *xray.Process
+	processMu         sync.RWMutex
 	lock              sync.Mutex
 	isNeedXrayRestart atomic.Bool
-	result            string
 )
+
+func currentXrayProcess() *xray.Process {
+	processMu.RLock()
+	defer processMu.RUnlock()
+	return p
+}
 
 type XrayService struct {
 	inboundService InboundService
@@ -26,10 +33,12 @@ type XrayService struct {
 }
 
 func (s *XrayService) IsXrayRunning() bool {
+	p := currentXrayProcess()
 	return p != nil && p.IsRunning()
 }
 
 func (s *XrayService) GetXrayErr() error {
+	p := currentXrayProcess()
 	if p == nil {
 		return nil
 	}
@@ -37,20 +46,15 @@ func (s *XrayService) GetXrayErr() error {
 }
 
 func (s *XrayService) GetXrayResult() string {
-	if result != "" {
-		return result
-	}
-	if s.IsXrayRunning() {
+	p := currentXrayProcess()
+	if p == nil || p.IsRunning() {
 		return ""
 	}
-	if p == nil {
-		return ""
-	}
-	result = p.GetResult()
-	return result
+	return p.GetResult()
 }
 
 func (s *XrayService) GetXrayVersion() string {
+	p := currentXrayProcess()
 	if p == nil {
 		return "Unknown"
 	}
@@ -89,6 +93,9 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		if inbound.Protocol == model.MTProto || inbound.Protocol == model.TUIC || inbound.Protocol == model.AmneziaWG {
 			continue
 		}
+		if err := xray.CheckLegacyStreamSettings(inbound.StreamSettings); err != nil {
+			return nil, fmt.Errorf("inbound %s: %w", inbound.Tag, err)
+		}
 		// get settings clients
 		settings := map[string]interface{}{}
 		json.Unmarshal([]byte(inbound.Settings), &settings)
@@ -119,14 +126,9 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 						continue
 					}
 				}
-				for key := range c {
-					if key != "email" && key != "id" && key != "password" && key != "flow" && key != "method" {
-						delete(c, key)
-					}
-					if c["flow"] == "xtls-rprx-vision-udp443" {
-						c["flow"] = "xtls-rprx-vision"
-					}
-				}
+				// GenXrayInboundConfig strips panel metadata and normalizes
+				// credentials centrally. An old allowlist here erased newer
+				// protocol fields such as Hysteria auth and MASQUE pass.
 				final_clients = append(final_clients, interface{}(c))
 			}
 
@@ -167,11 +169,13 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		inboundConfig := inbound.GenXrayInboundConfig()
 		xrayConfig.InboundConfigs = append(xrayConfig.InboundConfigs, *inboundConfig)
 	}
+	xray.NormalizeConfigProtocols(xrayConfig)
 	return xrayConfig, nil
 }
 
 func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
-	if !s.IsXrayRunning() {
+	p := currentXrayProcess()
+	if p == nil || !p.IsRunning() {
 		err := errors.New("xray is not running")
 		logger.Debug("Attempted to fetch Xray traffic, but Xray is not running:", err)
 		return nil, nil, err
@@ -191,6 +195,10 @@ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, 
 func (s *XrayService) RestartXray(isForce bool) error {
 	lock.Lock()
 	defer lock.Unlock()
+	return s.restartXrayLocked(isForce)
+}
+
+func (s *XrayService) restartXrayLocked(isForce bool) error {
 	logger.Debug("restart xray, force:", isForce)
 
 	xrayConfig, err := s.GetXrayConfig()
@@ -198,18 +206,41 @@ func (s *XrayService) RestartXray(isForce bool) error {
 		return err
 	}
 
-	if s.IsXrayRunning() {
-		if !isForce && p.GetConfig().Equals(xrayConfig) {
+	previous := currentXrayProcess()
+	wasRunning := previous != nil && previous.IsRunning()
+	if wasRunning {
+		if !isForce && previous.GetConfig().Equals(xrayConfig) {
 			logger.Debug("It does not need to restart xray")
 			return nil
 		}
-		p.Stop()
+	}
+	// Validate the complete effective template with the installed core before
+	// stopping a working process. A bad advanced-protocol setting must not
+	// disconnect every otherwise healthy inbound.
+	if err := xray.ValidateConfig(xrayConfig); err != nil {
+		return err
+	}
+	if wasRunning {
+		if err := previous.Stop(); err != nil {
+			return err
+		}
 	}
 
-	p = xray.NewProcess(xrayConfig)
-	result = ""
-	err = p.Start()
+	next := xray.NewProcess(xrayConfig)
+	processMu.Lock()
+	p = next
+	processMu.Unlock()
+	err = next.Start()
 	if err != nil {
+		// Startup failures must not strand a previously working configuration.
+		if wasRunning {
+			if rollbackErr := previous.Start(); rollbackErr != nil {
+				return errors.Join(err, fmt.Errorf("restore previous Xray: %w", rollbackErr))
+			}
+			processMu.Lock()
+			p = previous
+			processMu.Unlock()
+		}
 		return err
 	}
 	return nil
@@ -219,7 +250,8 @@ func (s *XrayService) StopXray() error {
 	lock.Lock()
 	defer lock.Unlock()
 	logger.Debug("Attempting to stop Xray...")
-	if s.IsXrayRunning() {
+	p := currentXrayProcess()
+	if p != nil && p.IsRunning() {
 		return p.Stop()
 	}
 	return errors.New("xray is not running")

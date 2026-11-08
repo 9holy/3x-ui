@@ -1,0 +1,7 @@
+# Enable only when using AmneziaWG's host-interface mode or a TUN inbound.
+services:
+  3x-ui:
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun

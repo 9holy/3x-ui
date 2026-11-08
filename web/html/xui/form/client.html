@@ -15,7 +15,7 @@
         </template>
         <a-input v-model.trim="client.email"></a-input>
     </a-form-item>
-    <a-form-item v-if="inbound.protocol === Protocols.TROJAN || inbound.protocol === Protocols.SHADOWSOCKS">
+    <a-form-item v-if="[Protocols.TROJAN, Protocols.SHADOWSOCKS, Protocols.TUIC, Protocols.MASQUE].includes(inbound.protocol)">
         <template slot="label">
             <a-tooltip>
                 <template slot="title">
@@ -23,12 +23,12 @@
                 </template>
                 {{ i18n "password" }}
                 <a-icon v-if="inbound.protocol === Protocols.SHADOWSOCKS"@click="client.password = RandomUtil.randomShadowsocksPassword()" type="sync"></a-icon>
-                <a-icon v-if="inbound.protocol === Protocols.TROJAN" @click="client.password = RandomUtil.randomSeq(10)"type="sync"> </a-icon>
+                <a-icon v-if="[Protocols.TROJAN, Protocols.TUIC, Protocols.MASQUE].includes(inbound.protocol)" @click="client.password = RandomUtil.randomSeq(10)"type="sync"> </a-icon>
             </a-tooltip>
         </template>
         <a-input v-model.trim="client.password"></a-input>
     </a-form-item>
-    <a-form-item v-if="inbound.protocol === Protocols.VMESS || inbound.protocol === Protocols.VLESS">
+    <a-form-item v-if="[Protocols.VMESS, Protocols.VLESS, Protocols.TUIC].includes(inbound.protocol)">
         <template slot="label">
             <a-tooltip>
                 <template slot="title">
@@ -39,6 +39,13 @@
         </template>
         <a-input v-model.trim="client.id"></a-input>
     </a-form-item>
+    <a-form-item v-if="inbound.protocol === Protocols.HYSTERIA" label="Auth Password">
+        <a-input v-model.trim="client.auth"><a-icon slot="addonAfter" type="sync" @click="client.auth = RandomUtil.randomSeq(24)"></a-icon></a-input>
+    </a-form-item>
+    <a-form-item v-if="inbound.protocol === Protocols.MTPROTO" label="FakeTLS Secret">
+        <a-input v-model.trim="client.secret"><a-icon slot="addonAfter" type="sync" @click="client.secret = ProtocolUtil.mtprotoSecret()"></a-icon></a-input>
+    </a-form-item>
+    <a-alert v-if="inbound.protocol === Protocols.TUIC" type="info" show-icon message="TUIC 暂不支持流量统计、流量限额和延迟开始；支持用户认证、启用/禁用和固定到期时间。" style="margin-bottom: 12px;"></a-alert>
     <a-form-item v-if="inbound.protocol === Protocols.VMESS" label='{{ i18n "security" }}'>
         <a-select v-model="client.security" :dropdown-class-name="themeSwitcher.currentTheme">
             <a-select-option v-for="key in USERS_SECURITY" :value="key">[[ key ]]</a-select-option>
@@ -126,7 +133,7 @@
                 <a-icon type="question-circle"></a-icon>
             </a-tooltip>
         </template>
-        <a-input-number v-model="client._totalGB" :min="0"></a-input-number>
+        <a-input-number v-model="client._totalGB" :min="0" :disabled="inbound.protocol === Protocols.TUIC && client.totalGB === 0"></a-input-number>
     </a-form-item>
     <a-form-item v-if="isEdit && clientStats" label='{{ i18n "usage" }}'>
         <a-tag :color="clientUsageColor(clientStats, app.trafficDiff)">
@@ -142,10 +149,10 @@
         </a-tooltip>
     </a-form-item>
     <a-form-item label='{{ i18n "pages.client.delayedStart" }}'>
-        <a-switch v-model="delayedStart" @click="client._expiryTime=0"></a-switch>
+        <a-switch v-model="delayedStart" :disabled="inbound.protocol === Protocols.TUIC && !delayedStart" @click="client._expiryTime=0"></a-switch>
     </a-form-item>
     <a-form-item v-if="delayedStart" label='{{ i18n "pages.client.expireDays" }}'>
-        <a-input-number v-model.number="delayedExpireDays" :min="0"></a-input-number>
+        <a-input-number v-model.number="delayedExpireDays" :min="0" :disabled="inbound.protocol === Protocols.TUIC"></a-input-number>
     </a-form-item>
     <a-form-item v-else>
         <template slot="label">

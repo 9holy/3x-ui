@@ -333,6 +333,8 @@ func main() {
 	flag.BoolVar(&showVersion, "v", false, "show version")
 
 	runCmd := flag.NewFlagSet("run", flag.ExitOnError)
+	checkCmd := flag.NewFlagSet("check", flag.ExitOnError)
+	checkDB := checkCmd.String("db", config.GetDBPath(), "existing database to check without changing it")
 
 	settingCmd := flag.NewFlagSet("setting", flag.ExitOnError)
 	var port int
@@ -370,6 +372,7 @@ func main() {
 		fmt.Println("    run            run web panel")
 		fmt.Println("    migrate        migrate form other/old x-ui")
 		fmt.Println("    setting        set settings")
+		fmt.Println("    check          check an upgrade against a database snapshot")
 	}
 
 	flag.Parse()
@@ -379,6 +382,15 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "check":
+		if err := checkCmd.Parse(os.Args[2:]); err != nil {
+			os.Exit(1)
+		}
+		if err := checkInstallation(*checkDB); err != nil {
+			fmt.Fprintln(os.Stderr, "Upgrade preflight failed:", err)
+			os.Exit(1)
+		}
+		fmt.Println("Upgrade preflight passed; production data was not changed.")
 	case "run":
 		err := runCmd.Parse(os.Args[2:])
 		if err != nil {

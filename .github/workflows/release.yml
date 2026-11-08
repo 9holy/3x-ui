@@ -1,142 +1,282 @@
-name: Release 3X-UI
+name: Build, verify and release
 
 on:
+  pull_request:
   push:
-    tags:
-      - "v*.*.*"
+    branches: [main]
   workflow_dispatch:
 
-jobs:
-  build:
-    strategy:
-      matrix:
-        platform:
-          - amd64
-          - arm64
-          - armv7
-          - armv6
-          - 386
-          - armv5
-          - s390x
-    runs-on: ubuntu-20.04
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+permissions:
+  contents: read
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import sys; sys.path.insert(0,"scripts"); import release; print(release.version())')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          publish=false
+          if [[ "$REF" == refs/heads/main ]]; then
+            if gh api "repos/$REPOSITORY/releases/tags/v$version" > "$RUNNER_TEMP/current-release.json" 2> "$RUNNER_TEMP/release-error"; then
+              publish=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["draft"]).lower())' "$RUNNER_TEMP/current-release.json")
+            elif grep -q 'HTTP 404' "$RUNNER_TEMP/release-error"; then
+              publish=true
+            else
+              cat "$RUNNER_TEMP/release-error" >&2
+              exit 1
+            fi
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+  native:
+    needs: metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [amd64, arm64, armv7, armv6, '386', armv5, s390x]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-
-      - name: Install dependencies
+          cache: true
+      - name: Install build and emulation dependencies
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
           sudo apt-get update
-          if [ "${{ matrix.platform }}" == "arm64" ]; then
-            sudo apt install gcc-aarch64-linux-gnu
-          elif [ "${{ matrix.platform }}" == "armv7" ]; then
-            sudo apt install gcc-arm-linux-gnueabihf
-          elif [ "${{ matrix.platform }}" == "armv6" ]; then
-            sudo apt install gcc-arm-linux-gnueabihf
-          elif [ "${{ matrix.platform }}" == "386" ]; then
-            sudo apt install gcc-i686-linux-gnu
-          elif [ "${{ matrix.platform }}" == "armv5" ]; then
-            sudo apt install gcc-arm-linux-gnueabi
-          elif [ "${{ matrix.platform }}" == "s390x" ]; then
-            sudo apt install gcc-s390x-linux-gnu
-          fi
-
-      - name: Build x-ui
+          packages='build-essential curl unzip python3 binutils qemu-user openssl'
+          case "$PLATFORM" in
+            arm64) packages="$packages gcc-aarch64-linux-gnu" ;;
+            armv7) packages="$packages gcc-arm-linux-gnueabihf" ;;
+            armv5|armv6) packages="$packages gcc-arm-linux-gnueabi" ;;
+            386) packages="$packages gcc-i686-linux-gnu" ;;
+            s390x) packages="$packages gcc-s390x-linux-gnu" ;;
+          esac
+          sudo apt-get install -y $packages
+      - name: Build complete static package
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: scripts/build-release.sh "$PLATFORM" dist
+      - name: Run packaged binaries, SQLite and modern core fixture
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: python3 scripts/release.py smoke "dist/x-ui-linux-$PLATFORM.tar.gz" "$PLATFORM"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: matrix.platform == 'amd64'
+        with:
+          node-version: '22'
+      - name: Native protocol and installer regression tests
+        if: matrix.platform == 'amd64'
         run: |
-          export CGO_ENABLED=1
-          export GOOS=linux
-          export GOARCH=${{ matrix.platform }}
-          if [ "${{ matrix.platform }}" == "arm64" ]; then
-            export GOARCH=arm64
-            export CC=aarch64-linux-gnu-gcc
-          elif [ "${{ matrix.platform }}" == "armv7" ]; then
-            export GOARCH=arm
-            export GOARM=7
-            export CC=arm-linux-gnueabihf-gcc
-          elif [ "${{ matrix.platform }}" == "armv6" ]; then
-            export GOARCH=arm
-            export GOARM=6
-            export CC=arm-linux-gnueabihf-gcc
-          elif [ "${{ matrix.platform }}" == "386" ]; then
-            export GOARCH=386
-            export CC=i686-linux-gnu-gcc
-          elif [ "${{ matrix.platform }}" == "armv5" ]; then
-            export GOARCH=arm
-            export GOARM=5
-            export CC=arm-linux-gnueabi-gcc
-          elif [ "${{ matrix.platform }}" == "s390x" ]; then
-            export GOARCH=s390x
-            export CC=s390x-linux-gnu-gcc
-          fi
-          go build -o xui-release -v main.go
-          
-          mkdir x-ui
-          cp xui-release x-ui/
-          cp x-ui.service x-ui/
-          cp x-ui.sh x-ui/
-          mv x-ui/xui-release x-ui/x-ui
-          mkdir x-ui/bin
-          cd x-ui/bin
-          
-          # Download dependencies
-          Xray_URL="https://github.com/XTLS/Xray-core/releases/download/v24.9.19/"
-          if [ "${{ matrix.platform }}" == "amd64" ]; then
-            wget ${Xray_URL}Xray-linux-64.zip
-            unzip Xray-linux-64.zip
-            rm -f Xray-linux-64.zip
-          elif [ "${{ matrix.platform }}" == "arm64" ]; then
-            wget ${Xray_URL}Xray-linux-arm64-v8a.zip
-            unzip Xray-linux-arm64-v8a.zip
-            rm -f Xray-linux-arm64-v8a.zip
-          elif [ "${{ matrix.platform }}" == "armv7" ]; then
-            wget ${Xray_URL}Xray-linux-arm32-v7a.zip
-            unzip Xray-linux-arm32-v7a.zip
-            rm -f Xray-linux-arm32-v7a.zip
-          elif [ "${{ matrix.platform }}" == "armv6" ]; then
-            wget ${Xray_URL}Xray-linux-arm32-v6.zip
-            unzip Xray-linux-arm32-v6.zip
-            rm -f Xray-linux-arm32-v6.zip
-          elif [ "${{ matrix.platform }}" == "386" ]; then
-            wget ${Xray_URL}Xray-linux-32.zip
-            unzip Xray-linux-32.zip
-            rm -f Xray-linux-32.zip
-          elif [ "${{ matrix.platform }}" == "armv5" ]; then
-            wget ${Xray_URL}Xray-linux-arm32-v5.zip
-            unzip Xray-linux-arm32-v5.zip
-            rm -f Xray-linux-arm32-v5.zip
-          elif [ "${{ matrix.platform }}" == "s390x" ]; then
-            wget ${Xray_URL}Xray-linux-s390x.zip
-            unzip Xray-linux-s390x.zip
-            rm -f Xray-linux-s390x.zip
-          fi
-          rm -f geoip.dat geosite.dat
-          wget https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
-          wget https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
-          wget -O geoip_IR.dat https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geoip.dat
-          wget -O geosite_IR.dat https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geosite.dat
-          wget -O geoip_VN.dat https://github.com/vuong2023/vn-v2ray-rules/releases/latest/download/geoip.dat
-          wget -O geosite_VN.dat https://github.com/vuong2023/vn-v2ray-rules/releases/latest/download/geosite.dat
-          mv xray xray-linux-${{ matrix.platform }}
-          cd ../..
-          
-      - name: Package
-        run: tar -zcvf x-ui-linux-${{ matrix.platform }}.tar.gz x-ui
-
-      - name: Upload files to Artifacts
-        uses: actions/upload-artifact@v4
+          set -euo pipefail
+          mkdir -p release-stage test-results
+          tar -xzf dist/x-ui-linux-amd64.tar.gz -C release-stage
+          export XUI_TEST_XRAY="$PWD/release-stage/x-ui/bin/xray-linux-amd64"
+          export XRAY_BINARY="$XUI_TEST_XRAY"
+          export MTPROTO_TEST_BINARY="$PWD/release-stage/x-ui/bin/mtg-linux-amd64"
+          export TUIC_TEST_BINARY="$PWD/release-stage/x-ui/bin/tuic-server-linux-amd64"
+          GOMEMLIMIT=1GiB go test -json -race -p 2 -count=1 ./... | tee test-results/go-tests.jsonl
+          node --test scripts/test-protocol-models.js | tee test-results/protocol-models.txt
+          XUI_RELEASE_ARCHIVE="$PWD/dist/x-ui-linux-amd64.tar.gz" python3 scripts/test-release-delivery.py
+      - name: Legacy KCP compatibility against Xray 24.9.19
+        if: matrix.platform == 'amd64'
+        run: |
+          mkdir -p legacy-core
+          python3 scripts/download-runtime.py \
+            https://github.com/XTLS/Xray-core/releases/download/v24.9.19/Xray-linux-64.zip legacy-core/xray.zip
+          unzip -q legacy-core/xray.zip -d legacy-core
+          LEGACY_XRAY_BINARY="$PWD/legacy-core/xray" \
+            XUI_TEST_XRAY="$PWD/release-stage/x-ui/bin/xray-linux-amd64" \
+            python3 scripts/test-kcp-compat.py --output-dir test-results/kcp
+      - name: Real browser protocol forms and import round trips
+        if: matrix.platform == 'amd64'
+        run: |
+          npm ci --prefix scripts/browser-test
+          ./scripts/browser-test/node_modules/.bin/playwright install --with-deps chromium
+          PANEL_BINARY="$PWD/release-stage/x-ui/x-ui" \
+            XRAY_BINARY="$PWD/release-stage/x-ui/bin/xray-linux-amd64" \
+            PROTOCOL_BROWSER_ARTIFACTS="$PWD/test-results/browser" \
+            node scripts/test-protocol-browser.js
+          PROTOCOL_UI_HTML_DIR="$PWD/test-results/browser" node --test scripts/test-protocol-ui.js
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: x-ui-linux-${{ matrix.platform }}
-          path: ./x-ui-linux-${{ matrix.platform }}
-
-      - name: Upload files to GH release
-        uses: svenstaro/upload-release-action@v2
+          name: release-native-${{ matrix.platform }}
+          path: dist/x-ui-linux-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && matrix.platform == 'amd64'
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ github.ref }}
-          file: x-ui-linux-${{ matrix.platform }}.tar.gz
-          asset_name: x-ui-linux-${{ matrix.platform }}.tar.gz
-          prerelease: true
+          name: protocol-verification-amd64
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  docker:
+    needs: [metadata, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: amd64
+            docker_platform: linux/amd64
+          - platform: arm64
+            docker_platform: linux/arm64
+          - platform: armv7
+            docker_platform: linux/arm/v7
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-native-${{ matrix.platform }}
+          path: release-packages
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build, export, reload and start the image
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+          DOCKER_PLATFORM: ${{ matrix.docker_platform }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/9holy/3x-ui:$VERSION"
+          docker buildx build --load --platform "$DOCKER_PLATFORM" --build-arg ARTIFACT_STAGE=release \
+            --label "org.opencontainers.image.source=https://github.com/9holy/3x-ui" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" --tag "$image" .
+          mkdir -p dist
+          docker save "$image" | gzip -n > "dist/3x-ui-docker-linux-$PLATFORM.tar.gz"
+          docker image rm "$image"
+          gzip -dc "dist/3x-ui-docker-linux-$PLATFORM.tar.gz" | docker load
+          docker run --rm --platform "$DOCKER_PLATFORM" -e XUI_FAIL2BAN_ENABLED=false "$image" /app/x-ui -v
+          docker run -d --name release-smoke --platform "$DOCKER_PLATFORM" --network none \
+            -e XUI_FAIL2BAN_ENABLED=false "$image"
+          trap 'docker logs release-smoke; docker rm -f release-smoke' EXIT
+          healthy=false
+          for attempt in $(seq 1 45); do
+            if docker exec release-smoke wget -qO /tmp/login.html http://127.0.0.1:2053/; then
+              docker exec release-smoke grep -q '<html' /tmp/login.html
+              healthy=true
+              break
+            fi
+            sleep 2
+          done
+          test "$healthy" = true
+          test "$(docker inspect -f '{{.State.Running}}' release-smoke)" = true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-docker-${{ matrix.platform }}
+          path: dist/3x-ui-docker-linux-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  verify:
+    needs: [native, docker]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+      - name: Verify all architectures and generate release checksums
+        run: python3 scripts/release.py assemble release-assets
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-release
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  publish:
+    needs: [metadata, verify]
+    if: github.ref == 'refs/heads/main' && needs.metadata.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-release
+          path: release-assets
+      - name: Upload draft, verify remote assets, then publish stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: python3 scripts/publish-release.py release-assets --repo "$REPOSITORY" --commit "$GITHUB_SHA"
+
+  mirror-ghcr:
+    needs: [metadata, publish]
+    if: github.ref == 'refs/heads/main'
+    # Public Docker-load archives are available even if registry visibility prevents mirroring.
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-docker-*
+          merge-multiple: true
+          path: docker-images
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Mirror versioned images and promote latest only when publicly readable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          image=ghcr.io/9holy/3x-ui
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for platform in amd64 arm64 armv7; do
+            gzip -dc "docker-images/3x-ui-docker-linux-$platform.tar.gz" | docker load
+            docker tag "$image:$VERSION" "$image:$VERSION-$platform"
+            docker push "$image:$VERSION-$platform"
+          done
+          docker buildx imagetools create -t "$image:$VERSION" \
+            "$image:$VERSION-amd64" "$image:$VERSION-arm64" "$image:$VERSION-armv7"
+          docker logout ghcr.io
+          docker buildx imagetools inspect "$image:$VERSION"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools create -t "$image:latest" "$image:$VERSION"

@@ -10,6 +10,11 @@ import (
 //go:embed version
 var version string
 
+//go:embed xray-version
+var xrayVersion string
+
+func GetMinimumXrayVersion() string { return strings.TrimSpace(xrayVersion) }
+
 //go:embed name
 var name string
 

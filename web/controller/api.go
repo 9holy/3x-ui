@@ -19,10 +19,7 @@ func NewAPIController(g *gin.RouterGroup) *APIController {
 }
 
 func (a *APIController) initRouter(g *gin.RouterGroup) {
-	api := g.Group("/panel/api")
-	RegisterNodePush(api, service.NodeService{})
-	NewNodeController(api)
-	g = api.Group("/inbounds")
+	g = g.Group("/panel/api/inbounds")
 	g.Use(a.checkLogin)
 
 	a.inboundController = NewInboundController(g)

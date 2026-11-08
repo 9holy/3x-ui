@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
@@ -96,7 +96,12 @@ func NewProcess(xrayConfig *Config) *Process {
 }
 
 type process struct {
-	cmd *exec.Cmd
+	mu        sync.RWMutex
+	lifecycle sync.Mutex
+	cmd       *exec.Cmd
+	done      chan struct{}
+	running   bool
+	stopping  bool
 
 	version string
 	apiPort int
@@ -119,31 +124,37 @@ func newProcess(config *Config) *process {
 }
 
 func (p *process) IsRunning() bool {
-	if p.cmd == nil || p.cmd.Process == nil {
-		return false
-	}
-	if p.cmd.ProcessState == nil {
-		return true
-	}
-	return false
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.running
 }
 
 func (p *process) GetErr() error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.exitErr
 }
 
 func (p *process) GetResult() string {
-	if len(p.logWriter.lastLine) == 0 && p.exitErr != nil {
-		return p.exitErr.Error()
+	line := p.logWriter.LastLine()
+	if err := p.GetErr(); line == "" && err != nil {
+		return err.Error()
 	}
-	return p.logWriter.lastLine
+	return line
 }
 
 func (p *process) GetVersion() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.version
 }
 
 func (p *Process) GetAPIPort() int {
+	if p == nil {
+		return 0
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.apiPort
 }
 
@@ -152,18 +163,32 @@ func (p *Process) GetConfig() *Config {
 }
 
 func (p *Process) GetOnlineClients() []string {
-	return p.onlineClients
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return append([]string(nil), p.onlineClients...)
 }
 
 func (p *Process) SetOnlineClients(users []string) {
-	p.onlineClients = users
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onlineClients = append([]string(nil), users...)
 }
 
 func (p *Process) GetUptime() uint64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return uint64(time.Since(p.startTime).Seconds())
 }
 
 func (p *process) refreshAPIPort() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for _, inbound := range p.config.InboundConfigs {
 		if inbound.Tag == "api" {
 			p.apiPort = inbound.Port
@@ -175,6 +200,8 @@ func (p *process) refreshAPIPort() {
 func (p *process) refreshVersion() {
 	cmd := exec.Command(GetBinaryPath(), "-version")
 	data, err := cmd.Output()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if err != nil {
 		p.version = "Unknown"
 	} else {
@@ -188,6 +215,8 @@ func (p *process) refreshVersion() {
 }
 
 func (p *process) Start() (err error) {
+	p.lifecycle.Lock()
+	defer p.lifecycle.Unlock()
 	if p.IsRunning() {
 		return errors.New("xray is already running")
 	}
@@ -195,7 +224,9 @@ func (p *process) Start() (err error) {
 	defer func() {
 		if err != nil {
 			logger.Error("Failure in running xray-core process: ", err)
+			p.mu.Lock()
 			p.exitErr = err
+			p.mu.Unlock()
 		}
 	}()
 
@@ -210,34 +241,73 @@ func (p *process) Start() (err error) {
 	}
 
 	configPath := GetConfigPath()
-	err = os.WriteFile(configPath, data, fs.ModePerm)
+	err = os.WriteFile(configPath, data, 0600)
 	if err != nil {
 		return common.NewErrorf("Failed to write configuration file: %v", err)
 	}
+	if err = os.Chmod(configPath, 0600); err != nil {
+		return err
+	}
 
 	cmd := exec.Command(GetBinaryPath(), "-c", configPath)
-	p.cmd = cmd
 
 	cmd.Stdout = p.logWriter
 	cmd.Stderr = p.logWriter
 
-	go func() {
-		err := cmd.Run()
-		if err != nil {
-			logger.Error("Failure in running xray-core:", err)
-			p.exitErr = err
-		}
-	}()
-
 	p.refreshVersion()
 	p.refreshAPIPort()
+	if err = cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan struct{})
+	p.mu.Lock()
+	p.cmd, p.done, p.running, p.stopping = cmd, done, true, false
+	p.exitErr, p.startTime = nil, time.Now()
+	p.mu.Unlock()
+	go func() {
+		err := cmd.Wait()
+		p.mu.Lock()
+		if err != nil && !p.stopping {
+			p.exitErr = err
+		}
+		p.running = false
+		close(done)
+		p.mu.Unlock()
+	}()
+	select {
+	case <-done:
+		if err := p.GetErr(); err != nil {
+			return err
+		}
+		return errors.New("xray exited during startup")
+	case <-time.After(100 * time.Millisecond):
+	}
 
 	return nil
 }
 
 func (p *process) Stop() error {
-	if !p.IsRunning() {
+	p.lifecycle.Lock()
+	defer p.lifecycle.Unlock()
+	p.mu.Lock()
+	if !p.running {
+		p.mu.Unlock()
 		return errors.New("xray is not running")
 	}
-	return p.cmd.Process.Signal(syscall.SIGTERM)
+	cmd, done := p.cmd, p.done
+	p.stopping = true
+	p.mu.Unlock()
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	select {
+	case <-done:
+		return nil
+	case <-time.After(5 * time.Second):
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		<-done
+		return nil
+	}
 }

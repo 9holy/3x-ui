@@ -2,6 +2,8 @@ package sub
 
 import (
 	_ "embed"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -21,7 +23,7 @@ type SubJsonService struct {
 	configJson       map[string]interface{}
 	defaultOutbounds []json_util.RawMessage
 	fragment         string
-	noises            string
+	noises           string
 	mux              string
 
 	inboundService service.InboundService
@@ -61,7 +63,7 @@ func NewSubJsonService(fragment string, noises string, mux string, rules string,
 		configJson:       configJson,
 		defaultOutbounds: defaultOutbounds,
 		fragment:         fragment,
-		noises:            noises,
+		noises:           noises,
 		mux:              mux,
 		SubService:       subService,
 	}
@@ -145,92 +147,124 @@ func (s *SubJsonService) GetJson(subId string, host string) (string, string, err
 }
 
 func (s *SubJsonService) getConfig(inbound *model.Inbound, client model.Client, host string) []json_util.RawMessage {
-	var newJsonArray []json_util.RawMessage
-	stream := s.streamData(inbound.StreamSettings)
-
-	externalProxies, ok := stream["externalProxy"].([]interface{})
-	if !ok || len(externalProxies) == 0 {
-		externalProxies = []interface{}{
-			map[string]interface{}{
-				"forceTls": "same",
-				"dest":     host,
-				"port":     float64(inbound.Port),
-				"remark":   "",
-			},
-		}
+	if xray.CheckLegacyStreamSettings(inbound.StreamSettings) != nil {
+		return nil
 	}
-
+	switch inbound.Protocol {
+	case model.VMESS, model.VLESS, model.Trojan, model.Shadowsocks, model.Hysteria, model.Masque:
+	default:
+		// Sidecars have no Xray outbound. Never turn them into a direct-only
+		// subscription that appears valid but bypasses the requested proxy.
+		return nil
+	}
+	var result []json_util.RawMessage
+	rawStream := inbound.StreamSettings
+	if inbound.Protocol == model.Hysteria || inbound.Protocol == model.Masque {
+		stream := jsonObject(rawStream)
+		stream["security"] = "tls"
+		encoded, _ := json.Marshal(stream)
+		rawStream = string(encoded)
+	}
+	stream := s.streamData(rawStream)
+	endpoints, _ := stream["externalProxy"].([]interface{})
+	if len(endpoints) == 0 {
+		endpoints = []interface{}{map[string]interface{}{
+			"forceTls": "same", "dest": host, "port": float64(inbound.Port), "remark": "",
+		}}
+	}
 	delete(stream, "externalProxy")
-
-	for _, ep := range externalProxies {
-		extPrxy := ep.(map[string]interface{})
-		inbound.Listen = extPrxy["dest"].(string)
-		inbound.Port = int(extPrxy["port"].(float64))
-		newStream := stream
-		switch extPrxy["forceTls"].(string) {
-		case "tls":
-			if newStream["security"] != "tls" {
+	for _, item := range endpoints {
+		ep := object(item)
+		copyInbound := *inbound
+		copyInbound.Listen = stringField(ep, "dest")
+		if port, ok := ep["port"].(float64); ok {
+			copyInbound.Port = int(port)
+		}
+		if copyInbound.Listen == "" || copyInbound.Port < 1 || copyInbound.Port > 65535 {
+			continue
+		}
+		encoded, _ := json.Marshal(stream)
+		newStream := jsonObject(string(encoded))
+		if inbound.Protocol != model.Hysteria && inbound.Protocol != model.Masque {
+			switch stringField(ep, "forceTls") {
+			case "tls":
 				newStream["security"] = "tls"
-				newStream["tslSettings"] = map[string]interface{}{}
-			}
-		case "none":
-			if newStream["security"] != "none" {
+				if _, ok := newStream["tlsSettings"]; !ok {
+					newStream["tlsSettings"] = map[string]interface{}{}
+				}
+				delete(newStream, "realitySettings")
+			case "none":
 				newStream["security"] = "none"
-				delete(newStream, "tslSettings")
+				delete(newStream, "tlsSettings")
+				delete(newStream, "realitySettings")
 			}
 		}
-		streamSettings, _ := json.MarshalIndent(newStream, "", "  ")
-
-		var newOutbounds []json_util.RawMessage
-
+		if newStream["security"] == "tls" {
+			tls := object(newStream["tlsSettings"])
+			if sni := stringField(ep, "sni"); sni != "" {
+				tls["serverName"] = sni
+			}
+			if alpn := stringList(ep["alpn"]); alpn != "" {
+				tls["alpn"] = strings.Split(alpn, ",")
+			}
+			newStream["tlsSettings"] = tls
+		}
+		streamSettings, _ := json.Marshal(newStream)
+		var proxy json_util.RawMessage
 		switch inbound.Protocol {
-		case "vmess", "vless":
-			newOutbounds = append(newOutbounds, s.genVnext(inbound, streamSettings, client))
-		case "trojan", "shadowsocks":
-			newOutbounds = append(newOutbounds, s.genServer(inbound, streamSettings, client))
+		case model.VMESS, model.VLESS:
+			proxy = s.genVnext(&copyInbound, streamSettings, client)
+		case model.Trojan, model.Shadowsocks:
+			proxy = s.genServer(&copyInbound, streamSettings, client)
+		case model.Hysteria, model.Masque:
+			proxy = s.genQUIC(&copyInbound, newStream, client)
 		}
-
-		newOutbounds = append(newOutbounds, s.defaultOutbounds...)
-		newConfigJson := make(map[string]interface{})
+		if len(proxy) == 0 {
+			continue
+		}
+		outbounds := append([]json_util.RawMessage{proxy}, s.defaultOutbounds...)
+		config := make(map[string]interface{}, len(s.configJson))
 		for key, value := range s.configJson {
-			newConfigJson[key] = value
+			config[key] = value
 		}
-		newConfigJson["outbounds"] = newOutbounds
-		newConfigJson["remarks"] = s.SubService.genRemark(inbound, client.Email, extPrxy["remark"].(string))
-
-		newConfig, _ := json.MarshalIndent(newConfigJson, "", "  ")
-		newJsonArray = append(newJsonArray, newConfig)
+		config["outbounds"] = outbounds
+		config["remarks"] = s.SubService.genRemark(inbound, client.Email, stringField(ep, "remark"))
+		configJSON, _ := json.Marshal(config)
+		result = append(result, configJSON)
 	}
-
-	return newJsonArray
+	return result
 }
 
-func (s *SubJsonService) streamData(stream string) map[string]interface{} {
-	var streamSettings map[string]interface{}
-	json.Unmarshal([]byte(stream), &streamSettings)
-	security, _ := streamSettings["security"].(string)
-	if security == "tls" {
-		streamSettings["tlsSettings"] = s.tlsData(streamSettings["tlsSettings"].(map[string]interface{}))
-	} else if security == "reality" {
-		streamSettings["realitySettings"] = s.realityData(streamSettings["realitySettings"].(map[string]interface{}))
+func (s *SubJsonService) streamData(raw string) map[string]interface{} {
+	stream := jsonObject(xray.NormalizeStreamSettings(raw))
+	switch stream["security"] {
+	case "tls":
+		stream["tlsSettings"] = s.tlsData(object(stream["tlsSettings"]))
+		delete(stream, "realitySettings")
+	case "reality":
+		stream["realitySettings"] = s.realityData(object(stream["realitySettings"]))
+		delete(stream, "tlsSettings")
+	default:
+		delete(stream, "tlsSettings")
+		delete(stream, "realitySettings")
 	}
-	delete(streamSettings, "sockopt")
-
+	delete(stream, "xtlsSettings")
+	delete(stream, "sockopt")
 	if s.fragment != "" {
-		streamSettings["sockopt"] = json_util.RawMessage(`{"dialerProxy": "fragment", "tcpKeepAliveIdle": 100, "tcpMptcp": true, "tcpNoDelay": true}`)
+		stream["sockopt"] = json_util.RawMessage(`{"dialerProxy":"fragment","tcpKeepAliveIdle":100,"tcpMptcp":true,"tcpNoDelay":true}`)
 	}
-
-	// remove proxy protocol
-	network, _ := streamSettings["network"].(string)
-	switch network {
-	case "tcp":
-		streamSettings["tcpSettings"] = s.removeAcceptProxy(streamSettings["tcpSettings"])
-	case "ws":
-		streamSettings["wsSettings"] = s.removeAcceptProxy(streamSettings["wsSettings"])
-	case "httpupgrade":
-		streamSettings["httpupgradeSettings"] = s.removeAcceptProxy(streamSettings["httpupgradeSettings"])
+	for _, key := range []string{"tcpSettings", "wsSettings", "httpupgradeSettings"} {
+		if settings, ok := stream[key]; ok {
+			stream[key] = s.removeAcceptProxy(settings)
+		}
 	}
-	return streamSettings
+	if settings, ok := stream["xhttpSettings"].(map[string]interface{}); ok {
+		stream["xhttpSettings"] = clientXHTTPSettings(settings)
+	}
+	if masks, ok := stream["finalmask"].(map[string]interface{}); ok {
+		stream["finalmask"] = clientFinalMask(masks)
+	}
+	return stream
 }
 
 func (s *SubJsonService) removeAcceptProxy(setting interface{}) map[string]interface{} {
@@ -242,18 +276,37 @@ func (s *SubJsonService) removeAcceptProxy(setting interface{}) map[string]inter
 }
 
 func (s *SubJsonService) tlsData(tData map[string]interface{}) map[string]interface{} {
-	tlsData := make(map[string]interface{}, 1)
-	tlsClientSettings, _ := tData["settings"].(map[string]interface{})
-
-	tlsData["serverName"] = tData["serverName"]
-	tlsData["alpn"] = tData["alpn"]
-	if allowInsecure, ok := tlsClientSettings["allowInsecure"].(bool); ok {
-		tlsData["allowInsecure"] = allowInsecure
+	result := make(map[string]interface{})
+	for _, key := range []string{"serverName", "alpn", "cipherSuites"} {
+		if value, ok := tData[key]; ok {
+			result[key] = value
+		}
 	}
-	if fingerprint, ok := tlsClientSettings["fingerprint"].(string); ok {
-		tlsData["fingerprint"] = fingerprint
+	client := object(tData["settings"])
+	if len(client) == 0 {
+		client = tData
 	}
-	return tlsData
+	for _, key := range []string{"fingerprint", "echConfigList"} {
+		if value, ok := client[key].(string); ok && value != "" {
+			result[key] = value
+		}
+	}
+	if names := stringList(client["verifyPeerCertByName"]); names != "" {
+		result["verifyPeerCertByName"] = names
+	}
+	if pins := stringList(client["pinnedPeerCertSha256"]); pins != "" {
+		values := strings.Split(pins, ",")
+		for i, pin := range values {
+			pin = strings.TrimSpace(pin)
+			encoded := strings.TrimRight(strings.NewReplacer("-", "+", "_", "/").Replace(pin), "=")
+			if raw, err := base64.RawStdEncoding.DecodeString(encoded); err == nil && len(raw) == 32 {
+				pin = hex.EncodeToString(raw)
+			}
+			values[i] = pin
+		}
+		result["pinnedPeerCertSha256"] = strings.Join(values, ",")
+	}
+	return result
 }
 
 func (s *SubJsonService) realityData(rData map[string]interface{}) map[string]interface{} {
@@ -261,11 +314,15 @@ func (s *SubJsonService) realityData(rData map[string]interface{}) map[string]in
 	rltyClientSettings, _ := rData["settings"].(map[string]interface{})
 
 	rltyData["show"] = false
-	rltyData["publicKey"] = rltyClientSettings["publicKey"]
-	rltyData["fingerprint"] = rltyClientSettings["fingerprint"]
+	rltyData["publicKey"] = stringField(rltyClientSettings, "publicKey", "password")
+	rltyData["fingerprint"] = stringField(rltyClientSettings, "fingerprint")
+	rltyData["mldsa65Verify"] = stringField(rltyClientSettings, "mldsa65Verify")
 
 	// Set random data
-	rltyData["spiderX"] = "/" + random.Seq(15)
+	rltyData["spiderX"] = stringField(rltyClientSettings, "spiderX")
+	if rltyData["spiderX"] == "" {
+		rltyData["spiderX"] = "/" + random.Seq(15)
+	}
 	shortIds, ok := rData["shortIds"].([]interface{})
 	if ok && len(shortIds) > 0 {
 		rltyData["shortId"] = shortIds[random.Num(len(shortIds))].(string)
@@ -292,8 +349,11 @@ func (s *SubJsonService) genVnext(inbound *model.Inbound, streamSettings json_ut
 		usersData[0].Security = client.Security
 	}
 	if inbound.Protocol == model.VLESS {
-		usersData[0].Flow = client.Flow
-		usersData[0].Encryption = "none"
+		usersData[0].Encryption = vlessClientEncryption(jsonObject(inbound.Settings))
+		stream := jsonObject(string(streamSettings))
+		if supportsVLESSFlow(stream, jsonObject(inbound.Settings)) {
+			usersData[0].Flow = client.Flow
+		}
 	}
 
 	vnextData := make([]VnextSetting, 1)
@@ -305,7 +365,7 @@ func (s *SubJsonService) genVnext(inbound *model.Inbound, streamSettings json_ut
 
 	outbound.Protocol = string(inbound.Protocol)
 	outbound.Tag = "proxy"
-	if s.mux != "" {
+	if s.mux != "" && !hasTransportMux(streamSettings) {
 		outbound.Mux = json_util.RawMessage(s.mux)
 	}
 	outbound.StreamSettings = streamSettings
@@ -344,7 +404,7 @@ func (s *SubJsonService) genServer(inbound *model.Inbound, streamSettings json_u
 
 	outbound.Protocol = string(inbound.Protocol)
 	outbound.Tag = "proxy"
-	if s.mux != "" {
+	if s.mux != "" && !hasTransportMux(streamSettings) {
 		outbound.Mux = json_util.RawMessage(s.mux)
 	}
 	outbound.StreamSettings = streamSettings
@@ -362,7 +422,7 @@ type Outbound struct {
 	StreamSettings json_util.RawMessage   `json:"streamSettings"`
 	Mux            json_util.RawMessage   `json:"mux,omitempty"`
 	ProxySettings  map[string]interface{} `json:"proxySettings,omitempty"`
-	Settings       OutboundSettings       `json:"settings,omitempty"`
+	Settings       interface{}            `json:"settings,omitempty"`
 }
 
 type OutboundSettings struct {

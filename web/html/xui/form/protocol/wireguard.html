@@ -7,7 +7,7 @@
           <span>{{ i18n "reset" }}</span>
         </template>
         {{ i18n "pages.xray.wireguard.secretKey" }}
-        <a-icon type="sync" @click="[inbound.settings.pubKey, inbound.settings.secretKey] = Object.values(Wireguard.generateKeypair())"></a-icon>
+        <a-icon type="sync" @click="inbound.settings.secretKey = Wireguard.generateKeypair().privateKey"></a-icon>
       </a-tooltip>
     </template>
     <a-input v-model.trim="inbound.settings.secretKey"></a-input>
@@ -37,7 +37,7 @@
           <a-icon @click="[peer.publicKey, peer.privateKey] = Object.values(Wireguard.generateKeypair())" type="sync"></a-icon>
         </a-tooltip>
       </template>
-      <a-input v-model.trim="peer.privateKey"></a-input>
+      <a-input v-model.trim="peer.privateKey" @change="updateWireguardPeerKey(peer)"></a-input>
     </a-form-item>
     <a-form-item>
       <template slot="label">

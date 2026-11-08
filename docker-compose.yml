@@ -1,9 +1,7 @@
 ---
-version: "3"
-
 services:
   3x-ui:
-    image: ghcr.io/mhsanaei/3x-ui:latest
+    image: ghcr.io/9holy/3x-ui:2.4.3
     container_name: 3x-ui
     hostname: yourhostname
     volumes:

@@ -17,7 +17,8 @@ class DBInbound {
         this.streamSettings = "";
         this.tag = "";
         this.sniffing = "";
-        this.clientStats = ""
+        this.allocate = "";
+        this.clientStats = [];
         if (data == null) {
             return;
         }
@@ -49,7 +50,7 @@ class DBInbound {
     }
 
     get isSocks() {
-        return this.protocol === Protocols.SOCKS;
+        return [Protocols.SOCKS, Protocols.MIXED].includes(this.protocol);
     }
 
     get isHTTP() {
@@ -84,13 +85,13 @@ class DBInbound {
     }
 
     get isExpiry() {
-        return this.expiryTime < new Date().getTime();
+        return this.expiryTime > 0 && this.expiryTime < Date.now();
     }
 
     toInbound() {
         let settings = {};
         if (!ObjectUtil.isEmpty(this.settings)) {
-            settings = JSON.parse(this.settings);
+            settings = typeof this.settings === "string" ? JSON.parse(this.settings) : (this.settings.toJson ? this.settings.toJson() : this.settings);
         }
 
         let streamSettings = {};
@@ -103,6 +104,11 @@ class DBInbound {
             sniffing = JSON.parse(this.sniffing);
         }
 
+        let allocate = {};
+        if (!ObjectUtil.isEmpty(this.allocate)) {
+            allocate = JSON.parse(this.allocate);
+        }
+
         const config = {
             port: this.port,
             listen: this.listen,
@@ -111,6 +117,7 @@ class DBInbound {
             streamSettings: streamSettings,
             tag: this.tag,
             sniffing: sniffing,
+            allocate: allocate,
             clientStats: this.clientStats,
         };
         return Inbound.fromJson(config);
@@ -122,6 +129,13 @@ class DBInbound {
             case Protocols.VLESS:
             case Protocols.TROJAN:
                 return true;
+            case Protocols.HYSTERIA:
+            case Protocols.MASQUE:
+            case Protocols.MTPROTO:
+            case Protocols.TUIC:
+                // Native users-map/secret formats remain editable as JSON;
+                // panel client dialogs require the panel's clients array.
+                return Array.isArray(this.toInbound().clients);
             case Protocols.SHADOWSOCKS:
                 return this.toInbound().isSSMultiUser;
             default:
@@ -130,11 +144,16 @@ class DBInbound {
     }
 
     hasLink() {
+        if (this.toInbound().network === 'xdrive') return false;
+        if ([Protocols.HYSTERIA, Protocols.TUIC, Protocols.MTPROTO].includes(this.protocol) && !this.isMultiUser()) return false;
         switch (this.protocol) {
             case Protocols.VMESS:
             case Protocols.VLESS:
             case Protocols.TROJAN:
             case Protocols.SHADOWSOCKS:
+            case Protocols.HYSTERIA:
+            case Protocols.TUIC:
+            case Protocols.MTPROTO:
                 return true;
             default:
                 return false;

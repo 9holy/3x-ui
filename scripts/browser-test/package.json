@@ -1,0 +1,8 @@
+{
+  "name": "3x-ui-protocol-browser-tests",
+  "private": true,
+  "version": "1.0.0",
+  "devDependencies": {
+    "playwright": "1.65.0"
+  }
+}

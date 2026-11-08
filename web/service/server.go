@@ -1,12 +1,13 @@
 package service
 
 import (
-	"archive/zip"
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -133,7 +134,7 @@ func (s *ServerService) GetStatus(lastStatus *Status) *Status {
 	}
 
 	status.LogicalPro = runtime.NumCPU()
-	if p != nil && p.IsRunning() {
+	if p := currentXrayProcess(); p != nil && p.IsRunning() {
 		status.AppStats.Uptime = p.GetUptime()
 	} else {
 		status.AppStats.Uptime = 0
@@ -238,42 +239,13 @@ func (s *ServerService) GetStatus(lastStatus *Status) *Status {
 
 	status.AppStats.Mem = rtm.Sys
 	status.AppStats.Threads = uint32(runtime.NumGoroutine())
-	if p != nil && p.IsRunning() {
+	if p := currentXrayProcess(); p != nil && p.IsRunning() {
 		status.AppStats.Uptime = p.GetUptime()
 	} else {
 		status.AppStats.Uptime = 0
 	}
 
 	return status
-}
-
-func (s *ServerService) GetXrayVersions() ([]string, error) {
-	url := "https://api.github.com/repos/XTLS/Xray-core/releases"
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-	buffer := bytes.NewBuffer(make([]byte, 8192))
-	buffer.Reset()
-	_, err = buffer.ReadFrom(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	releases := make([]Release, 0)
-	err = json.Unmarshal(buffer.Bytes(), &releases)
-	if err != nil {
-		return nil, err
-	}
-	var versions []string
-	for _, release := range releases {
-		if release.TagName >= "v1.7.5" {
-			versions = append(versions, release.TagName)
-		}
-	}
-	return versions, nil
 }
 
 func (s *ServerService) StopXrayService() (string error) {
@@ -286,120 +258,8 @@ func (s *ServerService) StopXrayService() (string error) {
 	return nil
 }
 
-func (s *ServerService) RestartXrayService() (string error) {
-	s.xrayService.StopXray()
-	defer func() {
-		err := s.xrayService.RestartXray(true)
-		if err != nil {
-			logger.Error("start xray failed:", err)
-		}
-	}()
-
-	return nil
-}
-
-func (s *ServerService) downloadXRay(version string) (string, error) {
-	osName := runtime.GOOS
-	arch := runtime.GOARCH
-
-	switch osName {
-	case "darwin":
-		osName = "macos"
-	}
-
-	switch arch {
-	case "amd64":
-		arch = "64"
-	case "arm64":
-		arch = "arm64-v8a"
-	case "armv7":
-		arch = "arm32-v7a"
-	case "armv6":
-		arch = "arm32-v6"
-	case "armv5":
-		arch = "arm32-v5"
-	case "386":
-		arch = "32"
-	case "s390x":
-		arch = "s390x"
-	}
-
-	fileName := fmt.Sprintf("Xray-%s-%s.zip", osName, arch)
-	url := fmt.Sprintf("https://github.com/XTLS/Xray-core/releases/download/%s/%s", version, fileName)
-	resp, err := http.Get(url)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	os.Remove(fileName)
-	file, err := os.Create(fileName)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	_, err = io.Copy(file, resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	return fileName, nil
-}
-
-func (s *ServerService) UpdateXray(version string) error {
-	zipFileName, err := s.downloadXRay(version)
-	if err != nil {
-		return err
-	}
-
-	zipFile, err := os.Open(zipFileName)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		zipFile.Close()
-		os.Remove(zipFileName)
-	}()
-
-	stat, err := zipFile.Stat()
-	if err != nil {
-		return err
-	}
-	reader, err := zip.NewReader(zipFile, stat.Size())
-	if err != nil {
-		return err
-	}
-
-	s.xrayService.StopXray()
-	defer func() {
-		err := s.xrayService.RestartXray(true)
-		if err != nil {
-			logger.Error("start xray failed:", err)
-		}
-	}()
-
-	copyZipFile := func(zipName string, fileName string) error {
-		zipFile, err := reader.Open(zipName)
-		if err != nil {
-			return err
-		}
-		os.Remove(fileName)
-		file, err := os.OpenFile(fileName, os.O_CREATE|os.O_RDWR|os.O_TRUNC, fs.ModePerm)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		_, err = io.Copy(file, zipFile)
-		return err
-	}
-
-	err = copyZipFile("xray", xray.GetBinaryPath())
-	if err != nil {
-		return err
-	}
-
-	return nil
+func (s *ServerService) RestartXrayService() error {
+	return s.xrayService.RestartXray(true)
 }
 
 func (s *ServerService) GetLogs(count string, level string, syslog string) []string {
@@ -566,27 +426,42 @@ func (s *ServerService) ImportDB(file multipart.File) error {
 }
 
 func (s *ServerService) GetNewX25519Cert() (interface{}, error) {
-	// Run the command
-	cmd := exec.Command(xray.GetBinaryPath(), "x25519")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	err := cmd.Run()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, xray.GetBinaryPath(), "x25519").Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("generate X25519 key pair: %w", err)
 	}
+	return parseX25519Keys(string(output))
+}
 
-	lines := strings.Split(out.String(), "\n")
-
-	privateKeyLine := strings.Split(lines[0], ":")
-	publicKeyLine := strings.Split(lines[1], ":")
-
-	privateKey := strings.TrimSpace(privateKeyLine[1])
-	publicKey := strings.TrimSpace(publicKeyLine[1])
-
-	keyPair := map[string]interface{}{
-		"privateKey": privateKey,
-		"publicKey":  publicKey,
+func parseX25519Keys(output string) (map[string]string, error) {
+	pair := map[string]string{}
+	for _, line := range strings.Split(output, "\n") {
+		label, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		normalized := strings.ToLower(strings.ReplaceAll(label, " ", ""))
+		field := ""
+		if normalized == "privatekey" {
+			field = "privateKey"
+		}
+		if normalized == "publickey" || normalized == "password(publickey)" || normalized == "password" {
+			field = "publicKey"
+		}
+		if field == "" {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		raw, err := base64.RawURLEncoding.DecodeString(value)
+		if err != nil || len(raw) != 32 {
+			return nil, errors.New("core returned an invalid X25519 key")
+		}
+		pair[field] = value
 	}
-
-	return keyPair, nil
+	if len(pair) != 2 {
+		return nil, errors.New("core did not return a complete X25519 key pair")
+	}
+	return pair, nil
 }

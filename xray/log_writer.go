@@ -3,6 +3,7 @@ package xray
 import (
 	"regexp"
 	"strings"
+	"sync"
 
 	"x-ui/logger"
 )
@@ -12,7 +13,14 @@ func NewLogWriter() *LogWriter {
 }
 
 type LogWriter struct {
+	mu       sync.RWMutex
 	lastLine string
+}
+
+func (lw *LogWriter) LastLine() string {
+	lw.mu.RLock()
+	defer lw.mu.RUnlock()
+	return lw.lastLine
 }
 
 func (lw *LogWriter) Write(m []byte) (n int, err error) {
@@ -20,7 +28,9 @@ func (lw *LogWriter) Write(m []byte) (n int, err error) {
 	// Convert the data to a string
 	message := strings.TrimSpace(string(m))
 	messages := strings.Split(message, "\n")
+	lw.mu.Lock()
 	lw.lastLine = messages[len(messages)-1]
+	lw.mu.Unlock()
 
 	for _, msg := range messages {
 		matches := regex.FindStringSubmatch(msg)

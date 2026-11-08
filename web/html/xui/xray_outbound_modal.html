@@ -1,5 +1,5 @@
 {{define "outModal"}}
-<a-modal id="out-modal" v-model="outModal.visible" :title="outModal.title" @ok="outModal.ok"
+<a-modal id="out-modal" v-model="outModal.visible" :title="outModal.title" @ok="outModal.ok()"
          :confirm-loading="outModal.confirmLoading" :closable="true" :mask-closable="false"
          :ok-button-props="{ props: { disabled: !outModal.isValid } }" style="overflow: hidden;"
          :ok-text="outModal.okText" cancel-text='{{ i18n "close" }}' :class="themeSwitcher.currentTheme">
@@ -20,16 +20,24 @@
         cm: null,
         duplicateTag: false,
         isValid: true,
+        jsonError: '',
         activeKey: '1',
         tags: [],
         ok() {
-            ObjectUtil.execute(outModal.confirm, outModal.outbound.toJson());
+            try {
+                if (this.jsonError) throw new Error(this.jsonError);
+                const config = this.outbound.toJson();
+                if (['http', 'h2', 'quic'].includes(config.streamSettings?.network)) throw new Error('旧 H2 / QUIC 传输已移除，请先手动迁移到 XHTTP stream-one (TLS ALPN h2 / h3)。');
+                if (config.streamSettings?.network === 'kcp' && config.streamSettings.kcpSettings?.seed === '') throw new Error('旧 mKCP 显式空 seed 不兼容，请设置非空 seed 并刷新客户端订阅。');
+                ObjectUtil.execute(this.confirm, config);
+            } catch (error) { Vue.prototype.$message.error(error.message); }
         },
         show({ title='', okText='{{ i18n "sure" }}', outbound, confirm=(outbound)=>{}, isEdit=false, tags=[]  }) {
             this.title = title;
             this.okText = okText;
             this.confirm = confirm;
             this.jsonMode = false;
+            this.jsonError = '';
             this.link = '';
             this.activeKey = '1';
             this.visible = true;
@@ -46,7 +54,7 @@
             outModal.confirmLoading = loading;
         },
         check(){
-            if(outModal.outbound.tag == '' || outModal.tags.includes(outModal.outbound.tag)){
+            if(outModal.jsonError || outModal.outbound.tag == '' || outModal.tags.includes(outModal.outbound.tag)){
                 this.duplicateTag = true;
                 this.isValid = false;
             } else {
@@ -55,7 +63,7 @@
             }
         },
         toggleJson(jsonTab) {
-            textAreaObj = document.getElementById('outboundJson');
+            const textAreaObj = document.getElementById('outboundJson');
             if(jsonTab){
                 if(this.cm != null) {
                         this.cm.toTextArea();
@@ -64,14 +72,16 @@
                 textAreaObj.value = JSON.stringify(this.outbound.toJson(), null, 2);
                 this.cm = CodeMirror.fromTextArea(textAreaObj, app.cmOptions);
                 this.cm.on('change',editor => {
-                    value = editor.getValue();
-                    if(this.isJsonString(value)){
-                        this.outbound = Outbound.fromJson(JSON.parse(value));
-                        this.check();
-                    }
+                    try {
+                        this.outbound = Outbound.fromJson(ProtocolUtil.parse(editor.getValue(), 'Outbound JSON'));
+                        this.outbound.toJson();
+                        this.jsonError = '';
+                    } catch (error) { this.jsonError = error.message; }
+                    this.check();
                 });
                 this.activeKey = '2';
             } else {
+                if (this.jsonError) { Vue.prototype.$message.error(this.jsonError); return; }
                 if(this.cm != null) {
                         this.cm.toTextArea();
                         this.cm=null;
@@ -108,7 +118,7 @@
                 return this.outModal.outbound.canEnableTls();
             },
             convertLink(){
-                newOutbound = Outbound.fromLink(outModal.link);
+                const newOutbound = Outbound.fromLink(outModal.link);
                 if(newOutbound){
                     this.outModal.outbound = newOutbound;
                     this.outModal.toggleJson(true);

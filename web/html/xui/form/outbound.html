@@ -127,7 +127,7 @@
                   </template>
                   {{ i18n "pages.xray.wireguard.secretKey" }}
                   <a-icon type="sync"
-                      @click="[outbound.settings.pubKey, outbound.settings.secretKey] = Object.values(Wireguard.generateKeypair())">
+                      @click="outbound.settings.secretKey = Wireguard.generateKeypair().privateKey">
                   </a-icon>
               </a-tooltip>
           </template>
@@ -190,16 +190,6 @@
             <a-input-number v-model.number="peer.keepAlive" :min="0"></a-input-number>
           </a-form-item>
         </a-form>
-      </template>
-
-      <!-- hysteria settings -->
-      <template v-if="outbound.protocol === Protocols.Hysteria">
-        <a-form-item label='{{ i18n "pages.inbounds.address" }}'>
-          <a-input v-model.trim="outbound.settings.address"></a-input>
-        </a-form-item>
-        <a-form-item label='{{ i18n "pages.inbounds.port" }}'>
-          <a-input-number v-model.number="outbound.settings.port" :min="1" :max="65532"></a-input-number>
-        </a-form-item>
       </template>
 
       <!-- Address + Port -->
@@ -273,21 +263,30 @@
         </template>
       </template>
 
+      <a-form-item v-if="outbound.protocol === Protocols.VLESS" label="VLESS Encryption">
+        <a-input v-model.trim="outbound.settings.encryption" placeholder="none / mlkem768x25519plus..."></a-input>
+      </a-form-item>
+      <a-alert v-if="outbound.protocol === Protocols.Loopback" type="info" message="Set inboundTag and optional sniffing in the JSON tab." style="margin-bottom: 10px;"></a-alert>
+
       <!-- stream settings -->
       <template v-if="outbound.canEnableStream()">
         <a-form-item label='{{ i18n "transmission" }}'>
-          <a-select v-model="outbound.stream.network" @change="streamNetworkChange" :dropdown-class-name="themeSwitcher.currentTheme">
+          <a-select v-model="outbound.stream.network" :disabled="[Protocols.Hysteria, Protocols.Masque].includes(outbound.protocol)" @change="streamNetworkChange" :dropdown-class-name="themeSwitcher.currentTheme">
             <a-select-option value="tcp">TCP</a-select-option>
             <a-select-option value="kcp">mKCP</a-select-option>
             <a-select-option value="ws">WebSocket</a-select-option>
-            <a-select-option value="http">H2</a-select-option>
+            <a-select-option v-if="outbound.stream.network === 'http'" value="http" disabled>H2 (removed)</a-select-option>
+            <a-select-option v-if="outbound.stream.network === 'quic'" value="quic" disabled>QUIC (removed)</a-select-option>
             <a-select-option value="grpc">gRPC</a-select-option>
             <a-select-option value="httpupgrade">HTTPUpgrade</a-select-option>
-            <a-select-option value="splithttp">SplitHTTP</a-select-option>
             <a-select-option value="xhttp">XHTTP</a-select-option>
+            <a-select-option value="xdrive">XDRIVE</a-select-option>
+            <a-select-option v-if="outbound.protocol === Protocols.Masque" value="masque">MASQUE</a-select-option>
             <a-select-option v-if="outbound.protocol === Protocols.Hysteria" value="hysteria">Hysteria2</a-select-option>
           </a-select>
         </a-form-item>
+        <a-alert v-if="['http', 'quic'].includes(outbound.stream.network)" type="error" show-icon
+          message="当前 Xray 已移除旧 H2 / QUIC 传输。原配置已保留；请手动迁移为 XHTTP stream-one，并根据需求设置 TLS ALPN h2 / h3，之后重新生成或刷新订阅。" style="margin-bottom: 12px;"></a-alert>
         <template v-if="outbound.stream.network === 'tcp'">
           <a-form-item label='HTTP {{ i18n "camouflage" }}'>
             <a-switch :checked="outbound.stream.tcp.type === 'http'" @change="checked => outbound.stream.tcp.type = checked ? 'http' : 'none'"></a-switch>
@@ -304,6 +303,8 @@
 
         <!-- kcp -->
         <template v-if="outbound.stream.network === 'kcp'">
+          <a-alert v-if="outbound.stream.kcp.legacyEmptySeed && !outbound.stream.kcp.seed" type="error" show-icon
+            message="旧 mKCP 显式空 seed 的加密方式已不兼容。请设置非空 seed 并刷新客户端订阅后再保存；不能自动转换为空 mask。" style="margin-bottom: 12px;"></a-alert>
           <a-form-item label='{{ i18n "camouflage" }}'>
             <a-select v-model="outbound.stream.kcp.type" :dropdown-class-name="themeSwitcher.currentTheme">
               <a-select-option value="none">None</a-select-option>
@@ -330,15 +331,8 @@
           <a-form-item label='Downlink (MB/s)'>
             <a-input-number v-model.number="outbound.stream.kcp.downCap" min="0"></a-input-number>
           </a-form-item>
-          <a-form-item label='Congestion'>
-            <a-switch v-model="outbound.stream.kcp.congestion"></a-switch>
-          </a-form-item>
-          <a-form-item label='Read Buffer (MB)'>
-            <a-input-number v-model.number="outbound.stream.kcp.readBuffer" min="0"></a-input-number>
-          </a-form-item>
-          <a-form-item label='Write Buffer (MB)'>
-            <a-input-number v-model.number="outbound.stream.kcp.writeBuffer" min="0"></a-input-number>
-          </a-form-item>
+          <a-form-item label="CWND Multiplier"><a-input-number v-model.number="outbound.stream.kcp.cwndMultiplier" :min="1"></a-input-number></a-form-item>
+          <a-form-item label="Max Sending Window"><a-input-number v-model.number="outbound.stream.kcp.maxSendingWindow" :min="0"></a-input-number></a-form-item>
         </template>
 
         <!-- ws -->
@@ -412,25 +406,26 @@
           </a-form-item>
         </template>
 
+        <a-form-item label="Advanced XHTTP JSON" v-if="outbound.stream.network === 'xhttp'">
+          <a-textarea v-model="outbound.stream.xhttp.extraText" :rows="8" spellcheck="false"></a-textarea>
+        </a-form-item>
+        <a-form-item label="XDRIVE JSON" v-if="outbound.stream.network === 'xdrive'">
+          <a-textarea v-model="outbound.stream.xdriveText" :rows="8" spellcheck="false"></a-textarea>
+        </a-form-item>
+        <a-form-item label="MASQUE JSON" v-if="outbound.stream.network === 'masque'">
+          <a-textarea v-model="outbound.stream.masqueText" :rows="8" spellcheck="false"></a-textarea>
+        </a-form-item>
+        <a-form-item label="FinalMask JSON" v-if="!outbound.stream.isReality">
+          <a-textarea v-model="outbound.stream.finalMaskText" :rows="5" spellcheck="false"></a-textarea>
+        </a-form-item>
+
         <!-- hysteria -->
         <template v-if="outbound.stream.network === 'hysteria'">
           <a-form-item label='Auth Password'>
             <a-input v-model.trim="outbound.stream.hysteria.auth"></a-input>
           </a-form-item>
-          <a-form-item label='Upload Speed'>
-            <a-input v-model.trim="outbound.stream.hysteria.up"></a-input>
-          </a-form-item>
-          <a-form-item label='Download Speed'>
-            <a-input v-model.trim="outbound.stream.hysteria.down"></a-input>
-          </a-form-item>
-          <a-form-item label='UDP Hop Port'>
-            <a-input v-model.trim="outbound.stream.hysteria.udphopPort"></a-input>
-          </a-form-item>
-          <a-form-item label='UDP Hop Interval (s)' v-if="outbound.stream.hysteria.udphopPort">
-            <a-input-number v-model.number="outbound.stream.hysteria.udphopInterval" :min="5"></a-input-number>
-          </a-form-item>
-          <a-form-item label='Max Idle Timeout (s)'>
-            <a-input-number v-model.number="outbound.stream.hysteria.maxIdleTimeout" :min="4" :max="120"></a-input-number>
+          <a-form-item label="UDP Idle Timeout (s)">
+            <a-input-number v-model.number="outbound.stream.hysteria.udpIdleTimeout" :min="2" :max="600"></a-input-number>
           </a-form-item>
         </template>
       </template>
@@ -439,7 +434,7 @@
       <template v-if="outbound.canEnableTls()">
         <a-form-item label='{{ i18n "security" }}'>
           <a-radio-group v-model="outbound.stream.security" button-style="solid">
-            <a-radio-button value="none">{{ i18n "none" }}</a-radio-button>
+            <a-radio-button v-if="![Protocols.Hysteria, Protocols.Masque].includes(outbound.protocol)" value="none">{{ i18n "none" }}</a-radio-button>
             <a-radio-button value="tls">TLS</a-radio-button>
             <a-radio-button v-if="outbound.canEnableReality()" value="reality">Reality</a-radio-button>
           </a-radio-group>
@@ -449,7 +444,7 @@
             <a-input v-model.trim="outbound.stream.tls.serverName"></a-input>
           </a-form-item>
           <a-form-item label="uTLS">
-            <a-select v-model="outbound.stream.tls.fingerprint" :dropdown-class-name="themeSwitcher.currentTheme">
+            <a-select v-model="outbound.stream.tls.fingerprint" :disabled="outbound.protocol === Protocols.Hysteria" :dropdown-class-name="themeSwitcher.currentTheme">
               <a-select-option value=''>None</a-select-option>
               <a-select-option v-for="key in UTLS_FINGERPRINT" :value="key">[[ key ]]</a-select-option>
             </a-select>
@@ -459,9 +454,9 @@
               <a-select-option v-for="alpn in ALPN_OPTION" :value="alpn">[[ alpn ]]</a-select-option>
             </a-select>
           </a-form-item>
-          <a-form-item label="Allow Insecure">
-            <a-switch v-model="outbound.stream.tls.allowInsecure"></a-switch>
-          </a-form-item>
+          <a-form-item label="ECH Config"><a-textarea v-model="outbound.stream.tls.echConfigList" :rows="2"></a-textarea></a-form-item>
+          <a-form-item label="Verify Certificate Name"><a-input v-model.trim="outbound.stream.tls.verifyPeerCertByName"></a-input></a-form-item>
+          <a-form-item label="Pinned Certificate SHA256"><a-select mode="tags" v-model="outbound.stream.tls.pinnedPeerCertSha256" :dropdown-class-name="themeSwitcher.currentTheme"></a-select></a-form-item>
         </template>
 
         <!-- reality settings -->
@@ -480,6 +475,7 @@
           <a-form-item label="SpiderX">
             <a-input v-model.trim="outbound.stream.reality.spiderX" style="width:250px"></a-input>
           </a-form-item>
+          <a-form-item label="ML-DSA-65 Verify"><a-input v-model.trim="outbound.stream.reality.mldsa65Verify"></a-input></a-form-item>
           <a-form-item label="Public Key">
             <a-input v-model.trim="outbound.stream.reality.publicKey"></a-input>
           </a-form-item>
@@ -532,7 +528,7 @@
     </a-form>
   </a-tab-pane>
   <a-tab-pane key="2" tab="JSON" force-render="true">
-    <a-form-item style="margin: 10px 0"> Link: <a-input v-model.trim="outModal.link" style="width: 300px; margin-right: 5px;" placeholder="vmess:// vless:// trojan:// ss://"></a-input>
+    <a-form-item style="margin: 10px 0"> Link: <a-input v-model.trim="outModal.link" style="width: 300px; margin-right: 5px;" placeholder="vmess:// vless:// trojan:// ss:// hysteria2:// hy2://"></a-input>
       <a-button @click="convertLink" type="primary">
         <a-icon type="form"></a-icon>
       </a-button>

@@ -1,5 +1,7 @@
 {{define "form/rawProtocol"}}
-<a-alert type="info" show-icon message="Protocol JSON" description="This protocol uses the native runtime configuration. Keep the original panel and edit the protocol fields as JSON." style="margin-bottom: 12px;"></a-alert>
+<a-alert type="info" show-icon message="Protocol JSON" description="Enter the protocol settings and client credentials below. Hysteria2 and MASQUE require TLS certificates in Stream JSON; TUIC requires certificate and private_key paths in Settings JSON." style="margin-bottom: 12px;"></a-alert>
+<a-alert v-if="inbound.protocol === Protocols.TUIC" type="info" show-icon message="TUIC 暂不支持流量统计、流量限额和延迟开始；支持用户认证、启用/禁用和固定到期时间。" style="margin-bottom: 12px;"></a-alert>
+<a-alert v-if="inbound.protocol === Protocols.AMNEZIAWG" type="info" show-icon message="AmneziaWG 使用完整接口配置，暂不支持面板逐用户配额和订阅。" style="margin-bottom: 12px;"></a-alert>
 <a-form :colon="false" :label-col="{ md: {span:8} }" :wrapper-col="{ md: {span:14} }">
     <a-form-item label="Settings JSON">
         <a-textarea v-model="inbound.rawSettingsText" :rows="10" spellcheck="false"></a-textarea>

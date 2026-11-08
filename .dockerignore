@@ -1,0 +1,10 @@
+.git
+dist
+release-assets
+release-stage
+test-results
+**/node_modules
+**/__pycache__
+*.db
+*.log
+*.test

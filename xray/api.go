@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 	"regexp"
+	"strings"
 	"time"
 
 	"x-ui/logger"
@@ -14,7 +17,6 @@ import (
 	statsService "github.com/xtls/xray-core/app/stats/command"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
-	"github.com/xtls/xray-core/infra/conf"
 	"github.com/xtls/xray-core/proxy/shadowsocks"
 	"github.com/xtls/xray-core/proxy/shadowsocks_2022"
 	"github.com/xtls/xray-core/proxy/trojan"
@@ -29,6 +31,7 @@ type XrayAPI struct {
 	StatsServiceClient   *statsService.StatsServiceClient
 	grpcClient           *grpc.ClientConn
 	isConnected          bool
+	apiPort              int
 }
 
 func (x *XrayAPI) Init(apiPort int) error {
@@ -44,6 +47,7 @@ func (x *XrayAPI) Init(apiPort int) error {
 
 	x.grpcClient = conn
 	x.isConnected = true
+	x.apiPort = apiPort
 
 	hsClient := command.NewHandlerServiceClient(conn)
 	ssClient := statsService.NewStatsServiceClient(conn)
@@ -64,24 +68,38 @@ func (x *XrayAPI) Close() {
 }
 
 func (x *XrayAPI) AddInbound(inbound []byte) error {
-	client := *x.HandlerServiceClient
-
-	conf := new(conf.InboundDetourConfig)
-	err := json.Unmarshal(inbound, conf)
+	if !x.isConnected || x.apiPort <= 0 {
+		return common.NewError("xray api is not initialized")
+	}
+	if !json.Valid(inbound) {
+		return common.NewError("invalid inbound JSON")
+	}
+	// Use the installed core's parser. The panel's legacy protobuf dependency
+	// cannot build newer protocols and silently drops unknown transport fields.
+	// A failed native API update falls back to the service's full-config restart.
+	f, err := os.CreateTemp("", "xui-inbound-*.json")
 	if err != nil {
-		logger.Debug("Failed to unmarshal inbound:", err)
 		return err
 	}
-	config, err := conf.Build()
-	if err != nil {
-		logger.Debug("Failed to build inbound Detur:", err)
+	defer os.Remove(f.Name())
+	config := append([]byte(`{"inbounds":[`), inbound...)
+	config = append(config, []byte(`]}`)...)
+	if _, err = f.Write(config); err != nil {
+		f.Close()
 		return err
 	}
-	inboundConfig := command.AddInboundRequest{Inbound: config}
-
-	_, err = client.AddInbound(context.Background(), &inboundConfig)
-
-	return err
+	if err = f.Close(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, GetBinaryPath(), "api", "adi",
+		fmt.Sprintf("--server=127.0.0.1:%d", x.apiPort), "--timeout=5", f.Name())
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("native Xray inbound update failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func (x *XrayAPI) DelInbound(tag string) error {
@@ -135,7 +153,7 @@ func (x *XrayAPI) AddUser(Protocol string, inboundTag string, user map[string]in
 			})
 		}
 	default:
-		return nil
+		return fmt.Errorf("protocol %s requires a full Xray config update", Protocol)
 	}
 
 	client := *x.HandlerServiceClient

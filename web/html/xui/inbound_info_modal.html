@@ -34,7 +34,7 @@
               <a-tag color="green">[[ inbound.network ]]</a-tag>
             </td>
           </tr>
-          <template v-if="inbound.isTcp || inbound.isWs || inbound.isH2 || inbound.isHttpupgrade || inbound.isSplithttp">
+          <template v-if="inbound.isTcp || inbound.isWs || inbound.isH2 || inbound.isHttpupgrade || inbound.isSplithttp || inbound.isXhttp">
             <tr>
               <td>{{ i18n "host" }}</td>
               <td v-if="inbound.host">
@@ -284,7 +284,7 @@
           <code>[[ link.link ]]</code>
         </tr-info-row>
       </template>
-      <table v-if="inbound.protocol == Protocols.DOKODEMO" class="tr-info-table">
+      <table v-if="[Protocols.DOKODEMO, Protocols.TUNNEL].includes(inbound.protocol)" class="tr-info-table">
         <tr>
           <th>{{ i18n "pages.inbounds.targetAddress" }}</th>
           <th>{{ i18n "pages.inbounds.destinationPort" }}</th>
@@ -408,8 +408,7 @@
                     <a-button style="min-width: 24px;" size="small" icon="snippets" :id="'copy-url-link-'+index" @click="copyToClipboard('copy-url-link-'+index, infoModal.links[index])"></a-button>
                   </a-tooltip>
                 </tr-info-title>
-                <div v-html="infoModal.links[index].replaceAll(`\n`,`<br />`)" style="border-radius: 1rem; padding: 0.5rem;" class="client-table-odd-row">
-                </div>
+                <pre style="white-space: pre-wrap; border-radius: 1rem; padding: 0.5rem;" class="client-table-odd-row">[[ infoModal.links[index] ]]</pre>
               </tr-info-row>
             </td>
           </tr>
@@ -437,10 +436,14 @@
       this.inbound = dbInbound.toInbound();
       this.dbInbound = new DBInbound(dbInbound);
       this.clientSettings = this.inbound.clients ? this.inbound.clients[index] : null;
-      this.isExpired = this.inbound.clients ? this.inbound.isExpiry(index) : this.dbInbound.isExpiry;
-      this.clientStats = this.inbound.clients ? this.dbInbound.clientStats.find(row => row.email === this.clientSettings.email) : [];
+      this.isExpired = this.clientSettings ? this.inbound.isExpiry(index) : this.dbInbound.isExpiry;
+      this.clientStats = this.clientSettings ? (this.dbInbound.clientStats || []).find(row => row.email === this.clientSettings.email) : null;
+      this.subLink = '';
+      this.subJsonLink = '';
       if (this.inbound.protocol == Protocols.WIREGUARD) {
         this.links = this.inbound.genInboundLinks(dbInbound.remark).split('\r\n')
+      } else if (this.inbound.clients && !this.clientSettings) {
+        this.links = [];
       } else {
         this.links = this.inbound.genAllLinks(this.dbInbound.remark, app.remarkModel, this.clientSettings);
       }
@@ -483,7 +486,7 @@
         if (infoModal.clientSettings) {
           return infoModal.clientSettings.enable;
         }
-        return infoModal.dbInbound.isEnable;
+        return infoModal.dbInbound.enable;
       },
     },
     methods: {
