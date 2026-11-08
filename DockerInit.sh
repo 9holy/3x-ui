@@ -98,7 +98,9 @@ fi
 download "https://github.com/amnezia-vpn/amneziawg-tools/archive/refs/tags/${AWG_TOOLS_VERSION}.tar.gz" awg-tools.tar.gz
 tar -xzf awg-tools.tar.gz
 AWG_TOOLS_DIR="amneziawg-tools-${AWG_TOOLS_VERSION#v}/src"
-make -C "$AWG_TOOLS_DIR" CC="${AWG_CC:-${CC:-cc}}" LDFLAGS=-static \
+# The workflow's PLATFORM names a CPU, while this upstream Makefile uses it
+# for the operating system and its UAPI include directory.
+make -C "$AWG_TOOLS_DIR" PLATFORM=linux CC="${AWG_CC:-${CC:-cc}}" LDFLAGS=-static \
     WIREGUARD_TOOLS_VERSION="${AWG_TOOLS_VERSION#v}" wg
 cp "${AWG_TOOLS_DIR}/wg" "${BIN_DIR}/awg"
 cp "${AWG_TOOLS_DIR}/wg-quick/linux.bash" "${BIN_DIR}/awg-quick"
