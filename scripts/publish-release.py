@@ -116,21 +116,20 @@ def publish(directory, repo, expected_commit):
         f"[逐项审核与迁移说明](https://github.com/{repo}/blob/{expected_commit}/docs/protocol-support-audit.md)\n"
     )
     if not existing:
-        with tempfile.NamedTemporaryFile("w", suffix=".md") as note_file:
-            note_file.write(notes)
-            note_file.flush()
-            subprocess.run(["gh", "release", "create", tag, "--repo", repo, "--target", expected_commit,
-                            "--draft", "--title", tag, "--notes-file", note_file.name], check=True)
-        existing = find_release(repo, tag)
-        if not existing:
-            raise ValueError("created draft is missing from the release listing")
+        # Creation returns the authoritative ID before the draft necessarily
+        # becomes visible in paginated listings.
+        existing = gh_json(["api", "--method", "POST", f"repos/{repo}/releases"],
+                           {"tag_name": tag, "target_commitish": expected_commit,
+                            "name": tag, "body": notes, "draft": True, "prerelease": False})
+        verify_draft(existing, existing["id"], tag, expected_commit)
     release_id = existing["id"]
     release_path = f"repos/{repo}/releases/{release_id}"
     release = gh_json(["api", release_path])
     verify_draft(release, release_id, tag, expected_commit)
     # A retry resumes only this same-source draft and refreshes its notes.
     release = gh_json(["api", "--method", "PATCH", release_path],
-                      {"name": tag, "body": notes})
+                      {"tag_name": tag, "target_commitish": expected_commit,
+                       "name": tag, "body": notes})
     verify_draft(release, release_id, tag, expected_commit)
     for name in sorted(hashes):
         # Never reselect the upload destination by tag. Recheck this exact
@@ -169,9 +168,12 @@ def publish(directory, repo, expected_commit):
         print("Remote asset verified:", name, flush=True)
     # Check identity again before the irreversible step. In particular, never
     # select a second draft or publish through a tag-based lookup on a retry.
-    current = find_release(repo, tag)
-    if not current:
-        raise ValueError("verified draft disappeared before publication")
+    listed = find_release(repo, tag)
+    if listed:
+        verify_draft(listed, release_id, tag, expected_commit)
+    # Listing visibility can lag creation. The known ID is authoritative, and
+    # a missing/deleted draft must still fail this direct read.
+    current = gh_json(["api", release_path])
     verify_draft(current, release_id, tag, expected_commit)
     if asset_identity(current["assets"]) != asset_identity(release["assets"]):
         raise ValueError("remote draft assets changed during verification")
@@ -180,7 +182,8 @@ def publish(directory, repo, expected_commit):
         raise ValueError("refusing to move a release tag to another commit")
     # Publication is the final write, after every remote byte has been checked.
     gh_json(["api", "--method", "PATCH", release_path],
-            {"draft": False, "prerelease": False, "make_latest": "true"})
+            {"tag_name": tag, "target_commitish": expected_commit,
+             "draft": False, "prerelease": False, "make_latest": "true"})
     published = gh_json(["api", release_path])
     if (published["id"] != release_id or published["tag_name"] != tag or
             published["target_commitish"] != expected_commit or

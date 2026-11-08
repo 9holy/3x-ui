@@ -1,0 +1,94 @@
+name: Validate real draft release API
+on:
+  push:
+    branches: [maintenance/validate-release-api-669854f]
+permissions:
+  contents: write
+jobs:
+  probe:
+    if: github.repository == '9holy/3x-ui'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify actual API metadata and asset round trip without publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, importlib.util, json, os, pathlib, subprocess, sys, tempfile
+          sys.path.insert(0, 'scripts')
+          spec = importlib.util.spec_from_file_location('publisher', 'scripts/publish-release.py')
+          publisher = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(publisher)
+          repo = '9holy/3x-ui'
+          source = '669854fc5373e6d331467059876273f506cb5ea3'
+          tag = 'release-api-probe-' + os.environ['GITHUB_RUN_ID']
+          release = publisher.gh_json(['api','--method','POST',f'repos/{repo}/releases'],
+              {'tag_name':tag,'target_commitish':source,'name':tag,'body':'Temporary draft API verification; never publish.','draft':True,'prerelease':False})
+          release_id = release['id']
+          path = f'repos/{repo}/releases/{release_id}'
+          report = {'repository':repo,'source':source,'draft_id':release_id,'tag':tag}
+          try:
+              publisher.verify_draft(release, release_id, tag, source)
+              release = publisher.gh_json(['api','--method','PATCH',path],
+                  {'tag_name':tag,'target_commitish':source,'name':tag,'body':'Verified explicit draft identity update.'})
+              publisher.verify_draft(release, release_id, tag, source)
+              install = pathlib.Path('install.sh')
+              expected = hashlib.sha256(install.read_bytes()).hexdigest()
+              asset = publisher.gh_json(['api','--method','POST',
+                  f'https://uploads.github.com/repos/{repo}/releases/{release_id}/assets?name=install.sh',
+                  '-H','Content-Type: application/octet-stream','-H',f'Content-Length: {install.stat().st_size}','--input',str(install)])
+              assert asset['name']=='install.sh' and asset['state']=='uploaded' and asset['size']==install.stat().st_size
+              with tempfile.TemporaryFile() as downloaded:
+                  subprocess.run(['gh','api','-H','Accept: application/octet-stream',f'repos/{repo}/releases/assets/{asset["id"]}'],stdout=downloaded,check=True)
+                  downloaded.seek(0)
+                  assert hashlib.file_digest(downloaded,'sha256').hexdigest()==expected
+              release = publisher.gh_json(['api','--method','PATCH',path],
+                  {'tag_name':tag,'target_commitish':source,'draft':True,'prerelease':False,'make_latest':'false'})
+              publisher.verify_draft(release, release_id, tag, source)
+              assert release['name']==tag and release['body']=='Verified explicit draft identity update.'
+              assert len(release['assets'])==1 and release['assets'][0]['id']==asset['id']
+              assert publisher.tag_commit(repo,tag) is None
+              report.update({'metadata_identity':'passed','upload_download_sha256':'passed','sha256':expected,'bytes':install.stat().st_size,'draft_only':True})
+              print('PASS: real REST creation ID, explicit PATCH identity, fixed-ID upload and downloaded SHA256; draft remained unpublished.')
+          finally:
+              current = publisher.gh_json(['api',path])
+              assert current['id']==release_id and current['draft'] is True and current['target_commitish']==source and current['author']['login']=='github-actions[bot]'
+              subprocess.run(['gh','api','--method','DELETE',path],check=True)
+              assert publisher.optional_api(path) is None
+              report['probe_draft_removed']=True
+              pathlib.Path('release-api-probe.json').write_text(json.dumps(report,indent=2)+'\n')
+          PY
+      - name: Remove the exact reviewed empty failed draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import importlib.util, json, pathlib, subprocess, sys
+          sys.path.insert(0, 'scripts')
+          spec=importlib.util.spec_from_file_location('publisher','scripts/publish-release.py')
+          publisher=importlib.util.module_from_spec(spec); spec.loader.exec_module(publisher)
+          path='repos/9holy/3x-ui/releases/438413203'
+          draft=publisher.gh_json(['api',path])
+          assert draft['id']==438413203 and draft['draft'] is True and draft['published_at'] is None
+          assert draft['tag_name']=='untagged-1aed55c3a854227be224' and draft['name']=='v2.4.3'
+          assert draft['target_commitish']=='669854fc5373e6d331467059876273f506cb5ea3' and draft['assets']==[]
+          assert draft['author']['login']=='github-actions[bot]' and publisher.tag_commit('9holy/3x-ui','v2.4.3') is None
+          pathlib.Path('failed-empty-draft-438413203.json').write_text(json.dumps(draft,indent=2)+'\n')
+          subprocess.run(['gh','api','--method','DELETE',path],check=True)
+          assert publisher.optional_api(path) is None
+          print('Removed only reviewed empty failed draft 438413203 after successful real API verification.')
+          PY
+      - name: Preserve API proof and old draft metadata
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-api-probe
+          path: |
+            release-api-probe.json
+            failed-empty-draft-438413203.json
+          if-no-files-found: error
+          retention-days: 14

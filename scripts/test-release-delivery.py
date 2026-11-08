@@ -202,6 +202,8 @@ class DraftReleaseAPI:
         self.uploads = []
         self.downloads = []
         self.remote_bytes = {}
+        self.created_ids = set()
+        self.hide_created_releases = False
         self.corrupt_name = None
         self.after_upload = lambda release: None
         self.after_download = lambda: None
@@ -225,9 +227,17 @@ class DraftReleaseAPI:
         self.requests.append(path)
         if '/releases/tags/' in path:
             raise subprocess.CalledProcessError(1, ['gh'] + arguments, stderr='HTTP 404: Not Found')
+        if path == f'repos/{self.repo}/releases':
+            assert arguments[1:3] == ['--method', 'POST']
+            self.writes.append(('create', payload['tag_name']))
+            release = dict(self.draft(), **copy.deepcopy(payload))
+            self.created_ids.add(release['id'])
+            self.releases.append(release)
+            return copy.deepcopy(release)
         if path.startswith(f'repos/{self.repo}/releases?per_page=100&page='):
             page = int(path.rsplit('=', 1)[1])
-            return copy.deepcopy(self.releases[(page - 1) * 100:page * 100])
+            visible = [r for r in self.releases if not (self.hide_created_releases and r['id'] in self.created_ids)]
+            return copy.deepcopy(visible[(page - 1) * 100:page * 100])
         if path.startswith(f'https://uploads.github.com/repos/{self.repo}/releases/'):
             assert arguments[1:3] == ['--method', 'POST']
             release_id = int(path.split('/releases/', 1)[1].split('/', 1)[0])
@@ -260,17 +270,15 @@ class DraftReleaseAPI:
                     self.events.append(('publish', release_id))
                     self.tag_sha = release['target_commitish']
                 release.update(payload)
+                # Reproduce the observed GitHub draft update behavior: omitting
+                # tag_name can restore the draft's internal untagged name.
+                if 'tag_name' not in payload:
+                    release['tag_name'] = 'untagged-1aed55c3a854227be224'
             return copy.deepcopy(release)
         raise AssertionError('unexpected JSON API request: ' + path)
 
     def run(self, arguments, **kwargs):
-        if arguments[:3] == ['gh', 'release', 'create']:
-            self.writes.append(('create', arguments[3]))
-            release = self.draft()
-            release['target_commitish'] = arguments[arguments.index('--target') + 1]
-            release['body'] = Path(arguments[arguments.index('--notes-file') + 1]).read_text()
-            self.releases.append(release)
-        elif arguments[:4] == ['gh', 'api', '--method', 'DELETE']:
+        if arguments[:4] == ['gh', 'api', '--method', 'DELETE']:
             asset_id = int(arguments[-1].rsplit('/', 1)[1])
             self.writes.append(('delete', asset_id))
             release = next(r for r in self.releases if any(a['id'] == asset_id for a in r['assets']))
@@ -353,7 +361,12 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(len(api.events), 15)
         self.assertFalse(any('/releases/tags/' in path for path in api.requests))
         self.assertEqual(api.writes[-1], ('patch', release_id,
-                         {'draft': False, 'prerelease': False, 'make_latest': 'true'}))
+                         {'tag_name': api.tag, 'target_commitish': 'a' * 40,
+                          'draft': False, 'prerelease': False, 'make_latest': 'true'}))
+        for write in api.writes:
+            if write[0] == 'patch':
+                self.assertEqual(write[2]['tag_name'], api.tag)
+                self.assertEqual(write[2]['target_commitish'], 'a' * 40)
         release = next(r for r in api.releases if r['id'] == release_id)
         self.assertFalse(release['draft'])
         self.assertFalse(release['prerelease'])
@@ -363,6 +376,13 @@ class PublisherTests(unittest.TestCase):
         api = DraftReleaseAPI()
         self.publish_with_api(api)
         self.assertEqual([w for w in api.writes if w[0] == 'create'], [('create', api.tag)])
+        self.assert_published_after_all_bytes(api)
+
+    def test_created_draft_can_publish_before_listing_becomes_visible(self):
+        api = DraftReleaseAPI()
+        api.hide_created_releases = True
+        self.publish_with_api(api)
+        self.assertEqual(len(api.created_ids), 1)
         self.assert_published_after_all_bytes(api)
 
     def test_same_source_draft_on_second_page_is_reused_and_notes_refreshed(self):
