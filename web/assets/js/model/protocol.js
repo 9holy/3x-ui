@@ -40,6 +40,25 @@ const ProtocolUtil = {
         return pin;
     },
 
+    wireguardKeyBase64(value) {
+        const key = String(value || '').trim();
+        if (!key) return '';
+        let bytes;
+        if (/^[a-fA-F0-9]{64}$/.test(key)) {
+            bytes = key.match(/../g).map(v => String.fromCharCode(parseInt(v, 16))).join('');
+        } else {
+            if (!/^[A-Za-z0-9+/_-]{43}=?$/.test(key)) throw new Error('WireGuard keys must contain 32 bytes');
+            bytes = atob(key.replace(/-/g, '+').replace(/_/g, '/') + (key.endsWith('=') ? '' : '='));
+        }
+        if (bytes.length !== 32) throw new Error('WireGuard keys must contain 32 bytes');
+        return btoa(bytes);
+    },
+
+    wireguardPublicKey(privateKey) {
+        const key = this.wireguardKeyBase64(privateKey);
+        return key ? Wireguard.generateKeypair(key).publicKey : '';
+    },
+
     network(value) {
         return value === 'raw' ? 'tcp' : value === 'splithttp' ? 'xhttp' : value;
     },
@@ -189,7 +208,7 @@ const ProtocolUtil = {
             if (client.echConfigList) params.set('ech', client.echConfigList);
             if (client.verifyPeerCertByName) params.set('vcn', client.verifyPeerCertByName);
             const pins = this.list(client.pinnedPeerCertSha256);
-            if (pins.length) params.set('pcs', pins.join(','));
+            if (pins.length) params.set('pcs', pins.map(pin => this.pinHex(pin)).join(','));
         } else if (security === 'reality') {
             const reality = stream.realitySettings || {};
             const client = reality.settings || reality;

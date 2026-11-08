@@ -17,7 +17,7 @@ class DBInbound {
         this.streamSettings = "";
         this.tag = "";
         this.sniffing = "";
-        this.clientStats = ""
+        this.clientStats = [];
         if (data == null) {
             return;
         }
@@ -84,7 +84,7 @@ class DBInbound {
     }
 
     get isExpiry() {
-        return this.expiryTime < new Date().getTime();
+        return this.expiryTime > 0 && this.expiryTime < Date.now();
     }
 
     toInbound() {

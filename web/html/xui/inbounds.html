@@ -921,23 +921,29 @@
                 });
             },
             async cloneInbound(baseInbound, dbInbound) {
-                const data = {
-                    up: dbInbound.up,
-                    down: dbInbound.down,
-                    total: dbInbound.total,
-                    remark: dbInbound.remark + " - Cloned",
-                    enable: dbInbound.enable,
-                    expiryTime: dbInbound.expiryTime,
-
-                    listen: '',
-                    port: RandomUtil.randomIntRange(10000, 60000),
-                    protocol: baseInbound.protocol,
-                    settings: Inbound.Settings.getSettings(baseInbound.protocol).toString(),
-                    streamSettings: baseInbound.stream.toString(),
-                    sniffing: baseInbound.sniffing.toString(),
-                    allocate: baseInbound.allocate.toString(),
-                };
-                await this.submit('/panel/inbound/add', data, inModal);
+                const wire = baseInbound.toJson();
+                wire.port = RandomUtil.randomIntRange(10000, 60000);
+                wire.listen = '';
+                // Preserve transport, certificate and native runtime settings;
+                // only panel customer credentials are replaced for the new row.
+                if (Array.isArray(wire.settings.clients)) {
+                    const defaults = Inbound.Settings.getSettings(wire.protocol);
+                    const settings = defaults instanceof XrayCommonClass ? defaults.toJson() : defaults;
+                    wire.settings.clients = settings.clients || [];
+                } else if (wire.protocol === Protocols.TUIC && wire.settings.users) {
+                    wire.settings.users = {[RandomUtil.randomUUID()]: RandomUtil.randomSeq(24)};
+                } else if (wire.protocol === Protocols.MTPROTO) {
+                    wire.settings.secret = ProtocolUtil.mtprotoSecret();
+                    wire.settings.email = RandomUtil.randomLowerAndNum(8);
+                }
+                if (wire.protocol === Protocols.AMNEZIAWG) {
+                    wire.settings.interface = 'awg' + RandomUtil.randomLowerAndNum(8);
+                }
+                const clonedRecord = new DBInbound(dbInbound);
+                clonedRecord.up = 0;
+                clonedRecord.down = 0;
+                clonedRecord.remark += ' - Cloned';
+                await this.submit('/panel/inbound/add', this.inboundPayload(Inbound.fromJson(wire), clonedRecord), inModal);
             },
             openAddInbound() {
                 inModal.show({
@@ -965,8 +971,9 @@
                     isEdit: true
                 });
             },
-            async addInbound(inbound, dbInbound) {
-                const data = {
+            inboundPayload(inbound, dbInbound) {
+                const wire = inbound.toJson();
+                return {
                     up: dbInbound.up,
                     down: dbInbound.down,
                     total: dbInbound.total,
@@ -977,33 +984,17 @@
                     listen: inbound.listen,
                     port: inbound.port,
                     protocol: inbound.protocol,
-                    settings: inbound.settings.toString(),
+                    settings: JSON.stringify(wire.settings),
+                    streamSettings: JSON.stringify(wire.streamSettings || {}),
+                    sniffing: JSON.stringify(wire.sniffing || {}),
+                    allocate: JSON.stringify(wire.allocate || {}),
                 };
-                if (inbound.canEnableStream()) data.streamSettings = inbound.stream.toString();
-                data.sniffing = inbound.sniffing.toString();
-                data.allocate = inbound.allocate.toString();
-
-                await this.submit('/panel/inbound/add', data, inModal);
+            },
+            async addInbound(inbound, dbInbound) {
+                await this.submit('/panel/inbound/add', this.inboundPayload(inbound, dbInbound), inModal);
             },
             async updateInbound(inbound, dbInbound) {
-                const data = {
-                    up: dbInbound.up,
-                    down: dbInbound.down,
-                    total: dbInbound.total,
-                    remark: dbInbound.remark,
-                    enable: dbInbound.enable,
-                    expiryTime: dbInbound.expiryTime,
-
-                    listen: inbound.listen,
-                    port: inbound.port,
-                    protocol: inbound.protocol,
-                    settings: inbound.settings.toString(),
-                };
-                if (inbound.canEnableStream()) data.streamSettings = inbound.stream.toString();
-                data.sniffing = inbound.sniffing.toString();
-                data.allocate = inbound.allocate.toString();
-
-                await this.submit(`/panel/inbound/update/${dbInbound.id}`, data, inModal);
+                await this.submit(`/panel/inbound/update/${dbInbound.id}`, this.inboundPayload(inbound, dbInbound), inModal);
             },
             openAddClient(dbInboundId) {
                 dbInbound = this.dbInbounds.find(row => row.id === dbInboundId);

@@ -113,6 +113,10 @@
             }
         },
         methods: {
+            updateWireguardPeerKey(peer) {
+                try { peer.publicKey = ProtocolUtil.wireguardPublicKey(peer.privateKey); }
+                catch (_) { /* A partially typed key remains editable; saving validates it. */ }
+            },
             streamNetworkChange() {
                 const inbound = inModal.inbound;
                 if (!inbound.canEnableTls()) inbound.stream.security = 'none';

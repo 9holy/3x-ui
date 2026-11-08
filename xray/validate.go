@@ -22,14 +22,22 @@ func ValidateInboundConfig(inbound []byte) error {
 }
 
 func ValidateConfig(config *Config) error {
+	return ValidateConfigWithBinary(config, GetBinaryPath())
+}
+
+func ValidateConfigWithBinary(config *Config, binary string) error {
 	encoded, err := json.Marshal(config)
 	if err != nil {
 		return err
 	}
-	return validateNativeConfig(encoded)
+	return validateNativeConfigBinary(encoded, binary)
 }
 
 func validateNativeConfig(config []byte) error {
+	return validateNativeConfigBinary(config, GetBinaryPath())
+}
+
+func validateNativeConfigBinary(config []byte, binary string) error {
 	f, err := os.CreateTemp("", "xui-validate-*.json")
 	if err != nil {
 		return err
@@ -44,7 +52,7 @@ func validateNativeConfig(config []byte) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, GetBinaryPath(), "run", "-test", "-c", f.Name()).CombinedOutput()
+	output, err := exec.CommandContext(ctx, binary, "run", "-test", "-c", f.Name()).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("Xray rejected the configuration: %w: %s", err, strings.TrimSpace(string(output)))
 	}

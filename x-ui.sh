@@ -134,73 +134,91 @@ before_show_menu() {
     show_menu
 }
 
-install() {
-    bash <(curl -Ls https://raw.githubusercontent.com/aircross/3x-ui/main/install.sh)
-    if [[ $? == 0 ]]; then
-        if [[ $# == 0 ]]; then
-            start
-        else
-            start 0
+# Download one file from a pinned public release and verify it before execution.
+release_file() {
+    local name="$1" destination="$2" requested="${3:-}" tag temp_dir
+    command -v python3 >/dev/null && command -v curl >/dev/null || {
+        LOGE "Install Python 3 and curl before updating." >&2; return 1;
+    }
+    temp_dir=$(mktemp -d) || return 1
+    if [[ -n "$requested" ]]; then
+        tag="v${requested#v}"
+    else
+        if ! curl -fsSL --proto '=https' --proto-redir '=https' --max-time 60 \
+            https://api.github.com/repos/9holy/3x-ui/releases/latest -o "$temp_dir/latest.json"; then
+            rm -rf "$temp_dir"; return 1
         fi
+        tag=$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert not r["draft"] and not r["prerelease"]; print(r["tag_name"])' "$temp_dir/latest.json") || {
+            rm -rf "$temp_dir"; return 1;
+        }
     fi
+    if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        LOGE "Invalid release version: $tag" >&2
+        rm -rf "$temp_dir"; return 1
+    fi
+    local base="https://github.com/9holy/3x-ui/releases/download/$tag"
+    if ! curl -fsSL --proto '=https' --proto-redir '=https' --max-time 60 "$base/$name" -o "$temp_dir/$name" ||
+       ! curl -fsSL --proto '=https' --proto-redir '=https' --max-time 60 "$base/SHA256SUMS" -o "$temp_dir/SHA256SUMS"; then
+        rm -rf "$temp_dir"; return 1
+    fi
+    if ! python3 - "$temp_dir" "$name" <<'PYVERIFY'
+import hashlib,pathlib,sys
+root=pathlib.Path(sys.argv[1]); name=sys.argv[2]
+entries=[line.split('  ',1) for line in (root/'SHA256SUMS').read_text().splitlines()]
+match=[digest for digest,filename in entries if filename==name]
+if len(match)!=1 or hashlib.sha256((root/name).read_bytes()).hexdigest()!=match[0]:
+    raise SystemExit('Release checksum mismatch: '+name)
+PYVERIFY
+    then
+        rm -rf "$temp_dir"; return 1
+    fi
+    if ! cp "$temp_dir/$name" "$destination"; then rm -rf "$temp_dir"; return 1; fi
+    rm -rf "$temp_dir"
+    printf '%s\n' "$tag"
+}
+
+run_release_installer() {
+    local script tag status
+    script=$(mktemp) || return 1
+    tag=$(release_file install.sh "$script" "${1:-}") || { rm -f "$script"; return 1; }
+    bash "$script" "$tag"
+    status=$?
+    rm -f "$script"
+    return "$status"
+}
+
+install() {
+    run_release_installer
 }
 
 update() {
-    confirm "This function will forcefully reinstall the latest version, and the data will not be lost. Do you want to continue?" "y"
+    confirm "Install the latest stable 9holy/3x-ui release while preserving existing data?" "y"
     if [[ $? != 0 ]]; then
         LOGE "Cancelled"
-        if [[ $# == 0 ]]; then
-            before_show_menu
-        fi
+        if [[ $# == 0 ]]; then before_show_menu; fi
         return 0
     fi
-    bash <(curl -Ls https://raw.githubusercontent.com/aircross/3x-ui/main/install.sh)
-    if [[ $? == 0 ]]; then
-        LOGI "Update is complete, Panel has automatically restarted "
+    if run_release_installer; then
+        LOGI "Update complete. The panel has restarted."
         exit 0
     fi
+    LOGE "Update failed. Check the installer output above."
+    return 1
 }
 
 update_menu() {
-    echo -e "${yellow}Updating Menu${plain}"
-    confirm "This function will update the menu to the latest changes." "y"
-    if [[ $? != 0 ]]; then
-        LOGE "Cancelled"
-        if [[ $# == 0 ]]; then
-            before_show_menu
-        fi
-        return 0
-    fi
-
-    wget --no-check-certificate -O /usr/bin/x-ui https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.sh
-    chmod +x /usr/local/x-ui/x-ui.sh
-    chmod +x /usr/bin/x-ui
-
-     if [[ $? == 0 ]]; then
-        echo -e "${green}Update successful. The panel has automatically restarted.${plain}"
-        exit 0
-    else
-        echo -e "${red}Failed to update the menu.${plain}"
-        return 1
-    fi
+    confirm "Update the management menu from the latest stable 9holy/3x-ui release?" "y"
+    if [[ $? != 0 ]]; then return 0; fi
+    update_shell
 }
 
 custom_version() {
-    echo "Enter the panel version (like 2.0.0):"
-    read panel_version
-
-    if [ -z "$panel_version" ]; then
-        echo "Panel version cannot be empty. Exiting."
-        exit 1
+    local panel_version
+    read -r -p "Panel version (for example 2.4.3): " panel_version
+    if [[ ! "${panel_version#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        LOGE "Enter a valid published version."; return 1
     fi
-
-    download_link="https://raw.githubusercontent.com/aircross/3x-ui/master/install.sh"
-
-    # Use the entered panel version in the download link
-    install_command="bash <(curl -Ls $download_link) v$panel_version"
-
-    echo "Downloading and installing panel version $panel_version..."
-    eval $install_command
+    run_release_installer "$panel_version"
 }
 
 # Function to handle the deletion of the script file
@@ -228,7 +246,7 @@ uninstall() {
     echo ""
     echo -e "Uninstalled Successfully.\n"
     echo "If you need to install this panel again, you can use below command:"
-    echo -e "${green}bash <(curl -Ls https://raw.githubusercontent.com/aircross/3x-ui/master/install.sh)${plain}"
+    echo -e "${green}bash <(curl -fsSL https://raw.githubusercontent.com/9holy/3x-ui/main/install.sh)${plain}"
     echo ""
     # Trap the SIGTERM signal
     trap delete_script SIGTERM
@@ -506,15 +524,16 @@ enable_bbr() {
 }
 
 update_shell() {
-    wget -O /usr/bin/x-ui -N --no-check-certificate https://github.com/aircross/3x-ui/raw/main/x-ui.sh
-    if [[ $? != 0 ]]; then
-        echo ""
-        LOGE "Failed to download script, Please check whether the machine can connect Github"
-        before_show_menu
-    else
-        chmod +x /usr/bin/x-ui
-        LOGI "Upgrade script succeeded, Please rerun the script" && exit 0
+    local staged
+    staged=$(mktemp /usr/bin/.x-ui-update.XXXXXXXX) || return 1
+    if release_file x-ui.sh "$staged" && chmod 755 "$staged" && mv -f "$staged" /usr/bin/x-ui; then
+        if [[ -d /usr/local/x-ui ]]; then cp /usr/bin/x-ui /usr/local/x-ui/x-ui.sh; fi
+        LOGI "Management script updated from 9holy/3x-ui. Run x-ui again."
+        exit 0
     fi
+    rm -f "$staged"
+    LOGE "Management script update failed; the previous script was retained."
+    return 1
 }
 
 # 0: running, 1: not running, 2: not installed

@@ -310,3 +310,61 @@ test('frontend-generated configurations are accepted by the selected Xray runtim
         }
     } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });
+
+test('Tunnel reads both field generations and gives modern values precedence', () => {
+    for (const protocol of ['tunnel', 'dokodemo-door']) {
+        const wire = incoming(`Inbound.fromJson({protocol:'${protocol}',settings:{address:'old.example',port:80,network:'udp',rewriteAddress:'new.example',rewritePort:8080,allowedNetwork:'tcp',followRedirect:true,customOption:7}}).toJson()`);
+        assert.equal(wire.settings.rewriteAddress, 'new.example');
+        assert.equal(wire.settings.rewritePort, 8080);
+        assert.equal(wire.settings.allowedNetwork, 'tcp');
+        assert.equal(wire.settings.customOption, 7);
+        assert.equal(wire.settings.address, undefined);
+        const legacy = incoming(`Inbound.fromJson({protocol:'${protocol}',settings:{address:'old.example',port:80,network:'udp'}}).toJson()`);
+        assert.equal(legacy.settings.rewriteAddress, 'old.example');
+        assert.equal(legacy.settings.rewritePort, 80);
+        assert.equal(legacy.settings.allowedNetwork, 'udp');
+    }
+});
+
+test('HTTP, Mixed and WireGuard accept empty imported account and peer lists', () => {
+    for (const protocol of ['http', 'mixed', 'socks']) {
+        assert.doesNotThrow(() => incoming(`Inbound.fromJson({protocol:'${protocol}',settings:{auth:'password'}}).toJson()`));
+    }
+    assert.deepEqual(incoming('Inbound.WireguardSettings.fromJson({}).toJson().peers'), []);
+    assert.deepEqual(outgoing('Outbound.WireguardSettings.fromJson({}).toJson().peers'), []);
+});
+
+test('all TLS outbounds and URI pin fields use the core SHA256 hex representation', () => {
+    const raw = Buffer.alloc(32, 255);
+    for (const pin of [raw.toString('base64'), raw.toString('base64url'), raw.toString('hex').toUpperCase()]) {
+        const wire = outgoing(`TlsStreamSettings.fromJson({pinnedPeerCertSha256:[${JSON.stringify(pin)}]}).toJson()`);
+        assert.equal(wire.pinnedPeerCertSha256, raw.toString('hex'));
+        const encoded = incoming(`(() => { const p=new URLSearchParams(); ProtocolUtil.applyLinkSecurity(p,{security:'tls',tlsSettings:{settings:{pinnedPeerCertSha256:[${JSON.stringify(pin)}]}}});return p.get('pcs'); })()`);
+        assert.equal(encoded, raw.toString('hex'));
+    }
+});
+
+test('WireGuard preserves stored client private keys and derives RFC7748 public keys', () => {
+    const privateHex = '77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a';
+    const publicHex = '8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a';
+    const privateBase64 = Buffer.from(privateHex, 'hex').toString('base64');
+    const publicBase64 = Buffer.from(publicHex, 'hex').toString('base64');
+    for (const key of [privateHex, privateBase64, Buffer.from(privateHex,'hex').toString('base64url')]) {
+        const record = incoming(`Inbound.WireguardSettings.Peer.fromJson({privateKey:${JSON.stringify(key)},allowedIPs:['10.0.0.2','fd00::2']}).toJson()`);
+        assert.equal(record.privateKey, privateBase64);
+        assert.equal(record.publicKey, publicBase64);
+        assert.deepEqual(record.allowedIPs, ['10.0.0.2/32', 'fd00::2/128']);
+    }
+    const conf = incoming(`(() => {const i=Inbound.fromJson({protocol:'wireguard',settings:{secretKey:'${privateHex}',peers:[{privateKey:'${privateHex}',preSharedKey:'${privateHex}',allowedIPs:['10.0.0.2/32','fd00::2/128']}]}});return i.getWireguardLink('2001:db8::1',51820,'wireguard',0);})()`);
+    assert.match(conf, /Endpoint = \[2001:db8::1\]:51820/);
+    assert.ok(conf.includes('PublicKey = '+publicBase64));
+    assert.ok(conf.includes('PrivateKey = '+privateBase64));
+    assert.ok(conf.includes('PresharedKey = '+privateBase64));
+    assert.match(conf, /Address = 10\.0\.0\.2\/32, fd00::2\/128/);
+});
+
+test('unlimited inbound expiry is not incorrectly displayed as expired', () => {
+    assert.equal(incoming('new DBInbound({expiryTime:0}).isExpiry'), false);
+    assert.equal(incoming('new DBInbound({expiryTime:-86400000}).isExpiry'), false);
+    assert.equal(incoming('new DBInbound({expiryTime:1}).isExpiry'), true);
+});

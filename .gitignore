@@ -17,3 +17,10 @@ release/
 README.es_ES.md
 README.md
 README.zh.md
+__pycache__/
+*.pyc
+node_modules/
+test-results/
+release-stage/
+release-packages/
+release-assets/

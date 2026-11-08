@@ -127,7 +127,7 @@
                   </template>
                   {{ i18n "pages.xray.wireguard.secretKey" }}
                   <a-icon type="sync"
-                      @click="[outbound.settings.pubKey, outbound.settings.secretKey] = Object.values(Wireguard.generateKeypair())">
+                      @click="outbound.settings.secretKey = Wireguard.generateKeypair().privateKey">
                   </a-icon>
               </a-tooltip>
           </template>

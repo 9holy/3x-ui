@@ -55,7 +55,7 @@ function runtime(page, model) {
         run(fs.readFileSync(path.join(root, 'web/assets/js', file), 'utf8'));
     }
     run(fs.readFileSync(path.join(root, 'web/assets/moment/moment.min.js'), 'utf8'));
-    const names = model === 'xray' ? ['inbound-modal','client-modal','client-bulk-modal'] : ['out-modal'];
+    const names = model === 'xray' ? ['inbound-modal','client-modal','client-bulk-modal','inbound-info-modal'] : ['out-modal'];
     for (const name of names) {
         assert.ok(scripts[name], `served ${name} template and script`);
         run(scripts[name]);
@@ -189,4 +189,49 @@ test('served modal warnings prevent removed transports and explicit empty legacy
             assert.match(ui.messages.at(-1), /H2|seed/);
         }
     }
+});
+
+test('all offered protocol forms render and preserve settings across JSON edits', {skip: !htmlDir}, () => {
+    const ui = runtime('inbounds', 'xray');
+    const protocols = ui.run('Object.values(Protocols).filter(p => p !== Protocols.TUN)');
+    for (const protocol of protocols) {
+        ui.run(`inModal.show({});inModal.inbound.protocol=${JSON.stringify(protocol)};`);
+        ui.render('inbound-modal');
+        ui.run('inModal.changeTab("json");inModal.changeTab("form");');
+        ui.render('inbound-modal');
+        assert.equal(ui.run('inModal.inbound.toJson().protocol'), protocol);
+    }
+});
+
+test('inbound details without a selected client do not crash or retain another subscription', {skip: !htmlDir}, () => {
+    const ui = runtime('inbounds', 'xray');
+    ui.run(`var db = new DBInbound({protocol:'vless',settings:JSON.stringify({clients:[{id:'id',email:'client',subId:'abc',enable:true}]}),clientStats:[]});infoModal.show(db,0);`);
+    ui.render('inbound-info-modal');
+    ui.run('infoModal.show(db,null);');
+    ui.render('inbound-info-modal');
+    assert.equal(ui.run('infoModal.subLink'), '');
+    assert.equal(ui.run('infoModal.subJsonLink'), '');
+    assert.equal(ui.run('infoModal.isExpired'), false);
+});
+
+test('clone payload preserves runtime config and creates fresh customer credentials', {skip: !htmlDir}, async () => {
+    const ui = runtime('inbounds', 'xray');
+    const cloneMethod = ui.html.match(/            async cloneInbound\(baseInbound, dbInbound\) \{[\s\S]*?(?=            openAddInbound\(\))/)?.[0];
+    const payloadMethod = ui.html.match(/            inboundPayload\(inbound, dbInbound\) \{[\s\S]*?(?=            async addInbound\()/)?.[0];
+    assert.ok(cloneMethod && payloadMethod, 'served application clone and persistence methods');
+    ui.run(`var savedClone;var cloneApp={${cloneMethod}${payloadMethod}async submit(url,data){savedClone=data;}};`);
+    for (const protocol of ['hysteria','masque','mtproto','tuic']) {
+        ui.run(`var original=new Inbound();original.protocol=${JSON.stringify(protocol)};var oldSettings=JSON.parse(original.rawSettingsText);oldSettings.certificate='/real/cert.pem';oldSettings.private_key='/real/key.pem';original.rawSettingsText=JSON.stringify(oldSettings);`);
+        await ui.run(`cloneApp.cloneInbound(original,new DBInbound({remark:'original',enable:false,up:123,down:456}));`);
+        assert.equal(ui.run('JSON.parse(savedClone.settings).certificate'), '/real/cert.pem');
+        assert.equal(ui.run('JSON.parse(savedClone.settings).private_key'), '/real/key.pem');
+        assert.notEqual(ui.run('JSON.parse(savedClone.settings).clients[0].email'), ui.run('oldSettings.clients[0].email'));
+        assert.notEqual(ui.run('ProtocolUtil.clientKey(original.protocol,JSON.parse(savedClone.settings).clients[0])'), ui.run('ProtocolUtil.clientKey(original.protocol,oldSettings.clients[0])'));
+        assert.equal(ui.run('savedClone.enable'), false);
+        assert.equal(ui.run('savedClone.up + savedClone.down'), 0);
+    }
+    ui.run('var original=Inbound.fromJson({protocol:"amneziawg",settings:{interface:"old-awg",config:"[Interface]\\nPrivateKey = saved-private-key\\n"}});');
+    await ui.run('cloneApp.cloneInbound(original,new DBInbound({remark:"awg",enable:false}));');
+    assert.equal(ui.run('JSON.parse(savedClone.settings).config'), '[Interface]\nPrivateKey = saved-private-key\n');
+    assert.notEqual(ui.run('JSON.parse(savedClone.settings).interface'), 'old-awg');
 });

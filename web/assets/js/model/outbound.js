@@ -375,7 +375,7 @@ class TlsStreamSettings extends CommonClass {
     toJson() {
         return {serverName: this.serverName, alpn: this.alpn, fingerprint: this.fingerprint,
             echConfigList: this.echConfigList || undefined,
-            pinnedPeerCertSha256: ProtocolUtil.list(this.pinnedPeerCertSha256).join(',') || undefined,
+            pinnedPeerCertSha256: ProtocolUtil.list(this.pinnedPeerCertSha256).map(pin => ProtocolUtil.pinHex(pin)).join(',') || undefined,
             verifyPeerCertByName: ProtocolUtil.list(this.verifyPeerCertByName).join(',') || undefined};
     }
 }
@@ -1228,13 +1228,17 @@ Outbound.WireguardSettings = class extends CommonClass {
         super();
         this.mtu = mtu;
         this.secretKey = secretKey;
-        this.pubKey = secretKey.length > 0 ? Wireguard.generateKeypair(secretKey).publicKey : '';
         this.address = Array.isArray(address) ? address.join(',') : address;
         this.workers = workers;
         this.domainStrategy = domainStrategy;
         this.reserved = Array.isArray(reserved) ? reserved.join(',') : reserved;
         this.peers = peers;
         this.kernelMode = kernelMode;
+    }
+
+    get pubKey() {
+        try { return ProtocolUtil.wireguardPublicKey(this.secretKey); }
+        catch (_) { return ''; }
     }
 
     addPeer() {
@@ -1253,7 +1257,7 @@ Outbound.WireguardSettings = class extends CommonClass {
             json.workers,
             json.domainStrategy,
             json.reserved,
-            json.peers.map(peer => Outbound.WireguardSettings.Peer.fromJson(peer)),
+            (json.peers || []).map(peer => Outbound.WireguardSettings.Peer.fromJson(peer)),
             json.kernelMode,
         );
     }
@@ -1261,7 +1265,7 @@ Outbound.WireguardSettings = class extends CommonClass {
     toJson() {
         return {
             mtu: this.mtu ?? undefined,
-            secretKey: this.secretKey,
+            secretKey: ProtocolUtil.wireguardKeyBase64(this.secretKey),
             address: this.address ? this.address.split(",") : [],
             workers: this.workers ?? undefined,
             domainStrategy: WireguardDomainStrategy.includes(this.domainStrategy) ? this.domainStrategy : undefined,
@@ -1300,8 +1304,8 @@ Outbound.WireguardSettings.Peer = class extends CommonClass {
 
     toJson() {
         return {
-            publicKey: this.publicKey,
-            preSharedKey: this.psk.length > 0 ? this.psk : undefined,
+            publicKey: ProtocolUtil.wireguardKeyBase64(this.publicKey),
+            preSharedKey: ProtocolUtil.wireguardKeyBase64(this.psk) || undefined,
             allowedIPs: this.allowedIPs ? this.allowedIPs : undefined,
             endpoint: this.endpoint,
             keepAlive: this.keepAlive ?? undefined,

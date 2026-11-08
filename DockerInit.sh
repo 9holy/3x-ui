@@ -3,8 +3,9 @@ set -eu
 
 # Shared by Docker and release archives. $1 is TARGETARCH (or a release
 # platform), $2 is TARGETVARIANT, and $3 optionally overrides build/bin.
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 download() {
-    curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o "$2" "$1"
+    python3 "${SCRIPT_DIR}/scripts/download-runtime.py" "$1" "$2"
 }
 
 GO_ARM=""
@@ -58,7 +59,7 @@ case "${1:-amd64}" in
 esac
 
 # Keep the protocol core identical in Docker images and release archives.
-XRAY_VERSION="v26.10.31"
+XRAY_VERSION="v$(cat "${SCRIPT_DIR}/config/xray-version")"
 MTG_VERSION="1.16.1"
 TUIC_VERSION="1.0.0"
 AWG_TOOLS_VERSION="v3.1.20260812"
@@ -76,7 +77,7 @@ cp xray "${BIN_DIR}/xray-linux-${GO_ARCH}"
 chmod +x "${BIN_DIR}/xray-linux-${GO_ARCH}"
 
 MTG_PACKAGE="mtg-multi-${MTG_VERSION}-linux-${PLATFORM}"
-download "https://github.com/mhsanaei/mtg-multi/releases/download/v${MTG_VERSION}/${MTG_PACKAGE}.tar.gz" mtg.tar.gz
+download "https://github.com/MHSanaei/mtg-multi/releases/download/v${MTG_VERSION}/${MTG_PACKAGE}.tar.gz" mtg.tar.gz
 tar -xzf mtg.tar.gz
 cp "${MTG_PACKAGE}/mtg-multi" "${BIN_DIR}/mtg-linux-${GO_ARCH}"
 chmod +x "${BIN_DIR}/mtg-linux-${GO_ARCH}"
@@ -97,7 +98,8 @@ fi
 download "https://github.com/amnezia-vpn/amneziawg-tools/archive/refs/tags/${AWG_TOOLS_VERSION}.tar.gz" awg-tools.tar.gz
 tar -xzf awg-tools.tar.gz
 AWG_TOOLS_DIR="amneziawg-tools-${AWG_TOOLS_VERSION#v}/src"
-make -C "$AWG_TOOLS_DIR" CC="${AWG_CC:-${CC:-cc}}" LDFLAGS=-static wg
+make -C "$AWG_TOOLS_DIR" CC="${AWG_CC:-${CC:-cc}}" LDFLAGS=-static \
+    WIREGUARD_TOOLS_VERSION="${AWG_TOOLS_VERSION#v}" wg
 cp "${AWG_TOOLS_DIR}/wg" "${BIN_DIR}/awg"
 cp "${AWG_TOOLS_DIR}/wg-quick/linux.bash" "${BIN_DIR}/awg-quick"
 chmod +x "${BIN_DIR}/awg" "${BIN_DIR}/awg-quick"
@@ -113,9 +115,9 @@ tar -xzf amneziawg-go.tar.gz
 )
 chmod +x "${BIN_DIR}/amneziawg-go"
 
-download "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" "${BIN_DIR}/geoip.dat"
-download "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" "${BIN_DIR}/geosite.dat"
-download "https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geoip.dat" "${BIN_DIR}/geoip_IR.dat"
-download "https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geosite.dat" "${BIN_DIR}/geosite_IR.dat"
-download "https://github.com/vuong2023/vn-v2ray-rules/releases/latest/download/geoip.dat" "${BIN_DIR}/geoip_VN.dat"
-download "https://github.com/vuong2023/vn-v2ray-rules/releases/latest/download/geosite.dat" "${BIN_DIR}/geosite_VN.dat"
+download "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/202611072203/geoip.dat" "${BIN_DIR}/geoip.dat"
+download "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/202611072203/geosite.dat" "${BIN_DIR}/geosite.dat"
+download "https://github.com/Chocolate4U/Iran-v2ray-rules/releases/download/202611081129/geoip.dat" "${BIN_DIR}/geoip_IR.dat"
+download "https://github.com/Chocolate4U/Iran-v2ray-rules/releases/download/202611081129/geosite.dat" "${BIN_DIR}/geosite_IR.dat"
+download "https://github.com/vuong2023/vn-v2ray-rules/releases/download/202405010158/geoip.dat" "${BIN_DIR}/geoip_VN.dat"
+download "https://github.com/vuong2023/vn-v2ray-rules/releases/download/202405010158/geosite.dat" "${BIN_DIR}/geosite_VN.dat"

@@ -1,6 +1,6 @@
 # 协议支持审核与修正
 
-审核日期：2026-11-07。范围是保留 aircross 的面板和 SQLite 架构，选择性补齐协议、传输、安全参数、运行时及订阅链路；不做 MHSanaei 整仓升级。
+审核基线日期：2026-11-07；正式交付修订：2026-11-09，版本 2.4.3。范围是保留 aircross 的面板和 SQLite 架构，选择性补齐协议、传输、安全参数、运行时及订阅链路；不做 MHSanaei 整仓升级。
 
 ## 对照基准
 
@@ -123,3 +123,16 @@ python3 scripts/test-kcp-compat.py --go /path/to/go
 - [上游核心输出转换](https://github.com/MHSanaei/3x-ui/blob/e535df03745c5ad003ae48e812024eb5fdc2124d/internal/database/model/model.go)
 - [上游分享链接生成](https://github.com/MHSanaei/3x-ui/blob/e535df03745c5ad003ae48e812024eb5fdc2124d/internal/sub/service.go)
 - [上游 JSON 订阅生成](https://github.com/MHSanaei/3x-ui/blob/e535df03745c5ad003ae48e812024eb5fdc2124d/internal/sub/json_service.go)
+
+## 正式交付修订
+
+本轮以 GitHub 上已保存的第一轮修正为基础完成正式发行，不把上次中断时未提交的原生 TUIC/AWG 扩展当作发行能力。上文列出的 Rust TUIC / 完整配置 AWG 边界继续成立。
+
+- 修复 raw 协议普通对象被 `toString()` 转为 `[object Object]` 的真实提交错误，使用统一 `toJson()` 保存，再由真实浏览器验证保存后重新打开。
+- 修复 Mixed/HTTP 空账户导入、Tunnel 现代字段和旧字段迁移、WG Hex/Base64 私钥派生与 IPv6 分享、无到期误标及无客户详情弹窗错误。
+- Xray 启动同步返回进程错误，停止等待退出，配置文件权限 0600；进程、在线客户和日志状态使用同步保护。
+- 核心更新按正确 ARM ISA 下载并验证官方 SHA256，限制最低版本 26.10.31，候选核心预检，启动失败恢复旧程序和运行状态；X25519 输出兼容新版标签并验证格式。
+- 安装器、管理脚本、README、Docker 与 Release 全部使用 9holy 仓库。升级前只对一致性 SQLite 副本迁移与检查；失败恢复旧程序、数据库和原启停状态。
+- PR 和主分支均运行七架构静态包/QEMU/SQLite、实际 runtime、race、模型/浏览器、旧 mKCP、安装回滚与三架构 Docker 导出重载检查。主分支验证全部14项资产后，将草稿转换为非预发布的正式版本。
+
+实际执行结果以该提交的 GitHub Actions 和 Release 清单为准；工作流中存在测试步骤不等于已经通过。

@@ -1570,7 +1570,7 @@ class Inbound extends XrayCommonClass {
         if (tls === 'tls') {
             const tls = wire.tlsSettings?.settings || {};
             if (tls.echConfigList) obj.ech = tls.echConfigList;
-            if (tls.pinnedPeerCertSha256?.length) obj.pcs = tls.pinnedPeerCertSha256.join(',');
+            if (tls.pinnedPeerCertSha256?.length) obj.pcs = tls.pinnedPeerCertSha256.map(pin => ProtocolUtil.pinHex(pin)).join(',');
             if (tls.verifyPeerCertByName) obj.vcn = tls.verifyPeerCertByName;
         }
         return 'vmess://' + base64(JSON.stringify(obj, null, 2));
@@ -1889,20 +1889,22 @@ class Inbound extends XrayCommonClass {
     }
 
     getWireguardLink(address, port, remark, peerId) {
+        const peer = this.settings.peers[peerId];
+        if (!peer.privateKey) return '';
         let txt = `[Interface]\n`
-        txt += `PrivateKey = ${this.settings.peers[peerId].privateKey}\n`
-        txt += `Address = ${this.settings.peers[peerId].allowedIPs[0]}\n`
+        txt += `PrivateKey = ${ProtocolUtil.wireguardKeyBase64(peer.privateKey)}\n`
+        txt += `Address = ${peer.allowedIPs.join(', ')}\n`
         txt += `DNS = 1.1.1.1, 1.0.0.1\n`
         if (this.settings.mtu) {
             txt += `MTU = ${this.settings.mtu}\n`
         }
-        txt += `\n# ${remark}\n`
+        txt += `\n# ${String(remark).replace(/[\r\n]/g, ' ')}\n`
         txt += `[Peer]\n`
         txt += `PublicKey = ${this.settings.pubKey}\n`
         txt += `AllowedIPs = 0.0.0.0/0, ::/0\n`
-        txt += `Endpoint = ${address}:${port}`
-        if (this.settings.peers[peerId].psk) {
-            txt += `\nPresharedKey = ${this.settings.peers[peerId].psk}`
+        txt += `Endpoint = ${ProtocolUtil.host(address)}:${port}`
+        if (peer.psk) {
+            txt += `\nPresharedKey = ${ProtocolUtil.wireguardKeyBase64(peer.psk)}`
         }
         if (this.settings.peers[peerId].keepAlive) {
             txt += `\nPersistentKeepalive = ${this.settings.peers[peerId].keepAlive}\n`
@@ -2621,18 +2623,18 @@ Inbound.DokodemoSettings = class extends Inbound.Settings {
     static fromJson(json = {}) {
         return new Inbound.DokodemoSettings(
             Protocols.DOKODEMO,
-            json.address,
-            json.port,
-            json.network,
+            json.rewriteAddress ?? json.address,
+            json.rewritePort ?? json.port,
+            json.allowedNetwork ?? json.network,
             json.followRedirect,
         );
     }
 
     toJson() {
         return {
-            address: this.address,
-            port: this.port,
-            network: this.network,
+            rewriteAddress: this.address,
+            rewritePort: this.port,
+            allowedNetwork: this.network,
             followRedirect: this.followRedirect,
         };
     }
@@ -2658,7 +2660,7 @@ Inbound.SocksSettings = class extends Inbound.Settings {
     static fromJson(json = {}) {
         let accounts;
         if (json.auth === 'password') {
-            accounts = json.accounts.map(
+            accounts = (json.accounts || []).map(
                 account => Inbound.SocksSettings.SocksAccount.fromJson(account)
             )
         }
@@ -2714,7 +2716,7 @@ Inbound.HttpSettings = class extends Inbound.Settings {
     static fromJson(json = {}) {
         return new Inbound.HttpSettings(
             Protocols.HTTP,
-            json.accounts.map(account => Inbound.HttpSettings.HttpAccount.fromJson(account)),
+            (json.accounts || []).map(account => Inbound.HttpSettings.HttpAccount.fromJson(account)),
             json.allowTransparent,
         );
     }
@@ -2744,9 +2746,13 @@ Inbound.WireguardSettings = class extends XrayCommonClass {
         super(protocol);
         this.mtu = mtu;
         this.secretKey = secretKey;
-        this.pubKey = secretKey.length > 0 ? Wireguard.generateKeypair(secretKey).publicKey : '';
         this.peers = peers;
         this.kernelMode = kernelMode;
+    }
+
+    get pubKey() {
+        try { return ProtocolUtil.wireguardPublicKey(this.secretKey); }
+        catch (_) { return ''; } // Keep partial key input editable; toJson validates before saving.
     }
 
     addPeer() {
@@ -2762,7 +2768,7 @@ Inbound.WireguardSettings = class extends XrayCommonClass {
             Protocols.WIREGUARD,
             json.mtu,
             json.secretKey,
-            json.peers.map(peer => Inbound.WireguardSettings.Peer.fromJson(peer)),
+            (json.peers || []).map(peer => Inbound.WireguardSettings.Peer.fromJson(peer)),
             json.kernelMode,
         );
     }
@@ -2770,7 +2776,7 @@ Inbound.WireguardSettings = class extends XrayCommonClass {
     toJson() {
         return {
             mtu: this.mtu ?? undefined,
-            secretKey: this.secretKey,
+            secretKey: ProtocolUtil.wireguardKeyBase64(this.secretKey),
             peers: Inbound.WireguardSettings.Peer.toJsonArray(this.peers),
             kernelMode: this.kernelMode,
         };
@@ -2780,16 +2786,14 @@ Inbound.WireguardSettings = class extends XrayCommonClass {
 Inbound.WireguardSettings.Peer = class extends XrayCommonClass {
     constructor(privateKey, publicKey, psk = '', allowedIPs = ['10.0.0.2/32'], keepAlive = 0) {
         super();
-        this.privateKey = privateKey
-        this.publicKey = publicKey;
+        this.privateKey = ProtocolUtil.wireguardKeyBase64(privateKey);
+        this.publicKey = ProtocolUtil.wireguardKeyBase64(publicKey);
         if (!this.publicKey) {
-            [this.publicKey, this.privateKey] = Object.values(Wireguard.generateKeypair())
+            if (this.privateKey) this.publicKey = ProtocolUtil.wireguardPublicKey(this.privateKey);
+            else [this.publicKey, this.privateKey] = Object.values(Wireguard.generateKeypair());
         }
         this.psk = psk;
-        allowedIPs.forEach((a, index) => {
-            if (a.length > 0 && !a.includes('/')) allowedIPs[index] += '/32';
-        })
-        this.allowedIPs = allowedIPs;
+        this.allowedIPs = allowedIPs.map(a => a && !a.includes('/') ? a + (a.includes(':') ? '/128' : '/32') : a);
         this.keepAlive = keepAlive;
     }
 
@@ -2805,12 +2809,12 @@ Inbound.WireguardSettings.Peer = class extends XrayCommonClass {
 
     toJson() {
         this.allowedIPs.forEach((a, index) => {
-            if (a.length > 0 && !a.includes('/')) this.allowedIPs[index] += '/32';
+            if (a.length > 0 && !a.includes('/')) this.allowedIPs[index] += a.includes(':') ? '/128' : '/32';
         });
         return {
-            privateKey: this.privateKey,
-            publicKey: this.publicKey,
-            preSharedKey: this.psk.length > 0 ? this.psk : undefined,
+            privateKey: ProtocolUtil.wireguardKeyBase64(this.privateKey) || undefined,
+            publicKey: ProtocolUtil.wireguardKeyBase64(this.publicKey),
+            preSharedKey: ProtocolUtil.wireguardKeyBase64(this.psk) || undefined,
             allowedIPs: this.allowedIPs,
             keepAlive: this.keepAlive ?? undefined,
         };
@@ -2833,6 +2837,9 @@ ProtocolUtil.retain(HTTPUpgradeStreamSettings, ['acceptProxyProtocol','path','ho
 ProtocolUtil.retain(Inbound.VLESSSettings, ['clients','decryption','encryption','fallbacks']);
 ProtocolUtil.retain(Inbound.VLESSSettings.VLESS, ['id','flow','email','limitIp','totalGB','expiryTime','enable','tgId','subId','reset']);
 ProtocolUtil.retain(Inbound.VmessSettings, ['clients']);
+ProtocolUtil.retain(Inbound.DokodemoSettings, ['address','port','network','rewriteAddress','rewritePort','allowedNetwork','followRedirect']);
+ProtocolUtil.retain(Inbound.WireguardSettings, ['mtu','secretKey','peers','kernelMode']);
+ProtocolUtil.retain(Inbound.WireguardSettings.Peer, ['privateKey','publicKey','preSharedKey','allowedIPs','keepAlive']);
 ProtocolUtil.retain(Inbound, ['port','listen','protocol','settings','streamSettings','tag','sniffing','allocate','clientStats']);
 
 // New protocols share lifecycle fields with the existing client dialogs, while

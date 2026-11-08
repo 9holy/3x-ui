@@ -2,6 +2,8 @@ package sub
 
 import (
 	_ "embed"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -293,7 +295,16 @@ func (s *SubJsonService) tlsData(tData map[string]interface{}) map[string]interf
 		result["verifyPeerCertByName"] = names
 	}
 	if pins := stringList(client["pinnedPeerCertSha256"]); pins != "" {
-		result["pinnedPeerCertSha256"] = pins
+		values := strings.Split(pins, ",")
+		for i, pin := range values {
+			pin = strings.TrimSpace(pin)
+			encoded := strings.TrimRight(strings.NewReplacer("-", "+", "_", "/").Replace(pin), "=")
+			if raw, err := base64.RawStdEncoding.DecodeString(encoded); err == nil && len(raw) == 32 {
+				pin = hex.EncodeToString(raw)
+			}
+			values[i] = pin
+		}
+		result["pinnedPeerCertSha256"] = strings.Join(values, ",")
 	}
 	return result
 }

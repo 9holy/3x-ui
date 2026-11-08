@@ -1,250 +1,269 @@
 #!/bin/bash
+# Install or upgrade the public 9holy/3x-ui release. Usage: bash install.sh [v2.4.3]
+# Sourcing this file only defines functions, for isolated delivery regression tests.
+set -Eeuo pipefail
+umask 077
 
-red='\033[0;31m'
-green='\033[0;32m'
-yellow='\033[0;33m'
-plain='\033[0m'
+REPOSITORY="9holy/3x-ui"
+INSTALL_DIR="/usr/local/x-ui"
+DB_PATH="${XUI_DB_FOLDER:-/etc/x-ui}/x-ui.db"
+MENU_PATH="/usr/bin/x-ui"
+UNIT_PATH="/etc/systemd/system/x-ui.service"
+WORK_DIR=""
+BACKUP_DIR=""
+transaction=false
+was_running=false
+was_enabled=false
+program_moved=false
+program_installed=false
+files_backed_up=false
 
-cur_dir=$(pwd)
+fail() { echo "Error: $*" >&2; return 1; }
 
-# check root
-[[ $EUID -ne 0 ]] && echo -e "${red}Fatal error: ${plain} Please run this script with root privilege \n " && exit 1
-
-# Check OS and set release variable
-if [[ -f /etc/os-release ]]; then
-    source /etc/os-release
-    release=$ID
-elif [[ -f /usr/lib/os-release ]]; then
-    source /usr/lib/os-release
-    release=$ID
-else
-    echo "Failed to check the system OS, please contact the author!" >&2
-    exit 1
-fi
-echo "The OS release is: $release"
-
-arch() {
+architecture() {
     case "$(uname -m)" in
-    x86_64 | x64 | amd64) echo 'amd64' ;;
-    i*86 | x86) echo '386' ;;
-    armv8* | armv8 | arm64 | aarch64) echo 'arm64' ;;
-    armv7* | armv7 | arm) echo 'armv7' ;;
-    armv6* | armv6) echo 'armv6' ;;
-    armv5* | armv5) echo 'armv5' ;;
-    s390x) echo 's390x' ;;
-    *) echo -e "${green}Unsupported CPU architecture! ${plain}" && rm -f install.sh && exit 1 ;;
+        x86_64|x64|amd64) echo amd64 ;;
+        i?86|x86) echo 386 ;;
+        aarch64|arm64|armv8*) echo arm64 ;;
+        armv7*|arm) echo armv7 ;;
+        armv6*) echo armv6 ;;
+        armv5*) echo armv5 ;;
+        s390x) echo s390x ;;
+        *) fail "Unsupported CPU architecture: $(uname -m)" ;;
     esac
 }
 
-echo "arch: $(arch)"
-
-os_version=""
-os_version=$(grep "^VERSION_ID" /etc/os-release | cut -d '=' -f2 | tr -d '"')
-
-if [[ "${release}" == "arch" ]]; then
-    echo "Your OS is Arch Linux"
-elif [[ "${release}" == "parch" ]]; then
-    echo "Your OS is Parch Linux"
-elif [[ "${release}" == "manjaro" ]]; then
-    echo "Your OS is Manjaro"
-elif [[ "${release}" == "armbian" ]]; then
-    echo "Your OS is Armbian"
-elif [[ "${release}" == "opensuse-tumbleweed" ]]; then
-    echo "Your OS is OpenSUSE Tumbleweed"
-elif [[ "${release}" == "centos" ]]; then
-    if [[ ${os_version} -lt 8 ]]; then
-        echo -e "${red} Please use CentOS 8 or higher ${plain}\n" && exit 1
+install_dependencies() {
+    # Do not update the whole OS as a side effect of installing this panel.
+    if command -v curl >/dev/null && command -v python3 >/dev/null && command -v tar >/dev/null; then
+        return
     fi
-elif [[ "${release}" == "ubuntu" ]]; then
-    if [[ ${os_version} -lt 20 ]]; then
-        echo -e "${red} Please use Ubuntu 20 or higher version!${plain}\n" && exit 1
-    fi
-elif [[ "${release}" == "fedora" ]]; then
-    if [[ ${os_version} -lt 36 ]]; then
-        echo -e "${red} Please use Fedora 36 or higher version!${plain}\n" && exit 1
-    fi
-elif [[ "${release}" == "amzn" ]]; then
-    if [[ ${os_version} != "2023" ]]; then
-        echo -e "${red} Please use Amazon Linux 2023!${plain}\n" && exit 1
-    fi
-elif [[ "${release}" == "debian" ]]; then
-    if [[ ${os_version} -lt 11 ]]; then
-        echo -e "${red} Please use Debian 11 or higher ${plain}\n" && exit 1
-    fi
-elif [[ "${release}" == "almalinux" ]]; then
-    if [[ ${os_version} -lt 9 ]]; then
-        echo -e "${red} Please use AlmaLinux 9 or higher ${plain}\n" && exit 1
-    fi
-elif [[ "${release}" == "rocky" ]]; then
-    if [[ ${os_version} -lt 9 ]]; then
-        echo -e "${red} Please use Rocky Linux 9 or higher ${plain}\n" && exit 1
-    fi
-elif [[ "${release}" == "oracle" ]]; then
-    if [[ ${os_version} -lt 8 ]]; then
-        echo -e "${red} Please use Oracle Linux 8 or higher ${plain}\n" && exit 1
-    fi
-else
-    echo -e "${red}Your operating system is not supported by this script.${plain}\n"
-    echo "Please ensure you are using one of the following supported operating systems:"
-    echo "- Ubuntu 20.04+"
-    echo "- Debian 11+"
-    echo "- CentOS 8+"
-    echo "- Fedora 36+"
-    echo "- Arch Linux"
-    echo "- Parch Linux"
-    echo "- Manjaro"
-    echo "- Armbian"
-    echo "- AlmaLinux 9+"
-    echo "- Rocky Linux 9+"
-    echo "- Oracle Linux 8+"
-    echo "- OpenSUSE Tumbleweed"
-    echo "- Amazon Linux 2023"
-    exit 1
-fi
-
-install_base() {
-    case "${release}" in
-    ubuntu | debian | armbian)
-        apt-get update && apt-get install -y -q wget curl tar tzdata
-        ;;
-    centos | almalinux | rocky | oracle)
-        yum -y update && yum install -y -q wget curl tar tzdata
-        ;;
-    fedora)
-        dnf -y update && dnf install -y -q wget curl tar tzdata
-        ;;
-    arch | manjaro | parch)
-        pacman -Syu && pacman -Syu --noconfirm wget curl tar tzdata
-        ;;
-    opensuse-tumbleweed)
-        zypper refresh && zypper -q install -y wget curl tar timezone
-        ;;
-    *)
-        apt-get update && apt install -y -q wget curl tar tzdata
-        ;;
-    esac
-}
-gen_random_string() {
-    local length="$1"
-    local random_string=$(LC_ALL=C tr -dc 'a-zA-Z0-9' </dev/urandom | fold -w "$length" | head -n 1)
-    echo "$random_string"
-}
-
-# This function will be called when user installed x-ui out of security
-config_after_install() {
-    echo -e "${yellow}Install/update finished! For security it's recommended to modify panel settings ${plain}"
-    read -p "Would you like to customize the panel settings? (If not, random settings will be applied) [y/n]: " config_confirm
-    if [[ "${config_confirm}" == "y" || "${config_confirm}" == "Y" ]]; then
-        read -p "Please set up your username: " config_account
-        echo -e "${yellow}Your username will be: ${config_account}${plain}"
-        read -p "Please set up your password: " config_password
-        echo -e "${yellow}Your password will be: ${config_password}${plain}"
-        read -p "Please set up the panel port: " config_port
-        echo -e "${yellow}Your panel port is: ${config_port}${plain}"
-        read -p "Please set up the web base path (ip:port/webbasepath/): " config_webBasePath
-        echo -e "${yellow}Your web base path is: ${config_webBasePath}${plain}"
-        echo -e "${yellow}Initializing, please wait...${plain}"
-        /usr/local/x-ui/x-ui setting -username ${config_account} -password ${config_password}
-        echo -e "${yellow}Account name and password set successfully!${plain}"
-        /usr/local/x-ui/x-ui setting -port ${config_port}
-        echo -e "${yellow}Panel port set successfully!${plain}"
-        /usr/local/x-ui/x-ui setting -webBasePath ${config_webBasePath}
-        echo -e "${yellow}Web base path set successfully!${plain}"
+    if command -v apt-get >/dev/null; then
+        apt-get update
+        apt-get install -y curl python3 tar ca-certificates
+    elif command -v dnf >/dev/null; then
+        dnf install -y curl python3 tar ca-certificates
+    elif command -v yum >/dev/null; then
+        yum install -y curl python3 tar ca-certificates
+    elif command -v pacman >/dev/null; then
+        pacman -S --needed --noconfirm curl python tar ca-certificates
+    elif command -v zypper >/dev/null; then
+        zypper --non-interactive install curl python3 tar ca-certificates
     else
-        echo -e "${red}Cancel...${plain}"
-        if [[ ! -f "/etc/x-ui/x-ui.db" ]]; then
-            local usernameTemp=$(head -c 6 /dev/urandom | base64)
-            local passwordTemp=$(head -c 6 /dev/urandom | base64)
-            local webBasePathTemp=$(gen_random_string 10)
-            /usr/local/x-ui/x-ui setting -username ${usernameTemp} -password ${passwordTemp} -webBasePath ${webBasePathTemp}
-            echo -e "This is a fresh installation, will generate random login info for security concerns:"
-            echo -e "###############################################"
-            echo -e "${green}Username: ${usernameTemp}${plain}"
-            echo -e "${green}Password: ${passwordTemp}${plain}"
-            echo -e "${green}WebBasePath: ${webBasePathTemp}${plain}"
-            echo -e "###############################################"
-            echo -e "${yellow}If you forgot your login info, you can type "x-ui settings" to check after installation${plain}"
-        else
-            echo -e "${yellow}This is your upgrade, will keep old settings. If you forgot your login info, you can type "x-ui settings" to check${plain}"
-        fi
+        fail "Install curl, Python 3, tar and CA certificates, then run this command again."
     fi
-    /usr/local/x-ui/x-ui migrate
 }
 
-install_x-ui() {
-    cd /usr/local/
+fetch() {
+    curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' \
+        --connect-timeout 20 --max-time 600 --retry 3 --output "$2" "$1"
+}
 
-    if [ $# == 0 ]; then
-        last_version=$(curl -Ls "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [[ ! -n "$last_version" ]]; then
-            echo -e "${red}Failed to fetch x-ui version, it maybe due to Github API restrictions, please try it later${plain}"
-            exit 1
-        fi
-        echo -e "Got x-ui latest version: ${last_version}, beginning the installation..."
-        wget -N --no-check-certificate -O /usr/local/x-ui-linux-$(arch).tar.gz https://github.com/MHSanaei/3x-ui/releases/download/${last_version}/x-ui-linux-$(arch).tar.gz
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}Downloading x-ui failed, please be sure that your server can access Github ${plain}"
-            exit 1
-        fi
+release_tag() {
+    local requested="${1:-}"
+    if [[ -n "$requested" ]]; then
+        requested="v${requested#v}"
     else
-        last_version=$1
-        url="https://github.com/MHSanaei/3x-ui/releases/download/${last_version}/x-ui-linux-$(arch).tar.gz"
-        echo -e "Beginning to install x-ui $1"
-        wget -N --no-check-certificate -O /usr/local/x-ui-linux-$(arch).tar.gz ${url}
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}Download x-ui $1 failed,please check the version exists ${plain}"
-            exit 1
-        fi
+        fetch "https://api.github.com/repos/$REPOSITORY/releases/latest" "$WORK_DIR/latest.json" || return 1
+        requested=$(python3 - "$WORK_DIR/latest.json" <<'PY'
+import json,sys
+release=json.load(open(sys.argv[1]))
+if release.get('draft') or release.get('prerelease'):
+    raise SystemExit('The latest release is not a public stable release')
+print(release['tag_name'])
+PY
+) || return 1
     fi
-
-    if [[ -e /usr/local/x-ui/ ]]; then
-        systemctl stop x-ui
-        rm /usr/local/x-ui/ -rf
+    if [[ ! "$requested" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        fail "Invalid release version: $requested"
+        return 1
     fi
+    printf '%s\n' "$requested"
+}
 
-    tar zxvf x-ui-linux-$(arch).tar.gz
-    rm x-ui-linux-$(arch).tar.gz -f
-    cd x-ui
-    chmod +x x-ui
+verify_asset() {
+    python3 - "$1" "$2" <<'PY'
+import hashlib,pathlib,sys
+asset=pathlib.Path(sys.argv[1]); entries={}
+for line in pathlib.Path(sys.argv[2]).read_text().splitlines():
+    digest,name=line.split('  ',1)
+    if name in entries or pathlib.PurePosixPath(name).name != name:
+        raise SystemExit('Invalid checksum manifest')
+    entries[name]=digest
+expected=entries.get(asset.name)
+if expected is None:
+    raise SystemExit('Release checksum is missing: '+asset.name)
+hash=hashlib.sha256()
+with asset.open('rb') as source:
+    for chunk in iter(lambda:source.read(1024*1024),b''):
+        hash.update(chunk)
+if hash.hexdigest()!=expected:
+    raise SystemExit('Release checksum mismatch: '+asset.name)
+PY
+}
 
-    # Check the system's architecture and rename the file accordingly
-    if [[ $(arch) == "armv5" || $(arch) == "armv6" || $(arch) == "armv7" ]]; then
-        mv bin/xray-linux-$(arch) bin/xray-linux-arm
-        chmod +x bin/xray-linux-arm
+extract_package() {
+    python3 - "$1" "$2" <<'PY'
+import pathlib,sys,tarfile
+seen=set()
+with tarfile.open(sys.argv[1],'r:gz') as archive:
+    members=archive.getmembers()
+    for item in members:
+        path=pathlib.PurePosixPath(item.name)
+        if path.is_absolute() or '..' in path.parts or not path.parts or path.parts[0]!='x-ui':
+            raise SystemExit('Unsafe archive path: '+item.name)
+        if path in seen or not (item.isfile() or item.isdir()):
+            raise SystemExit('Duplicate, linked or special archive entry: '+item.name)
+        seen.add(path)
+    # Validation rejects every link and special file, including on Python <3.12.
+    archive.extractall(sys.argv[2],members=members)
+PY
+}
+
+preflight() {
+    local candidate="$1" current_dir
+    current_dir="$candidate"
+    [[ ! -d "$INSTALL_DIR" ]] || current_dir="$INSTALL_DIR"
+    (
+        cd "$current_dir"
+        XUI_BIN_FOLDER="$candidate/bin" XRAY_LOCATION_ASSET="$candidate/bin" \
+            "$candidate/x-ui" check -db "$DB_PATH"
+    )
+}
+
+backup_state() {
+    mkdir -p "$BACKUP_DIR"
+    chmod 700 "$BACKUP_DIR"
+    local suffix
+    for suffix in '' '-wal' '-shm'; do
+        [[ ! -e "$DB_PATH$suffix" ]] || cp -a "$DB_PATH$suffix" "$BACKUP_DIR/database$suffix"
+    done
+    [[ ! -e "$MENU_PATH" ]] || cp -a "$MENU_PATH" "$BACKUP_DIR/menu"
+    [[ ! -e "$UNIT_PATH" ]] || cp -a "$UNIT_PATH" "$BACKUP_DIR/unit"
+    files_backed_up=true
+}
+
+restore_file() {
+    local source="$1" destination="$2"
+    if [[ -e "$source" ]]; then
+        cp -a "$source" "$destination"
+    else
+        rm -f "$destination"
     fi
+}
 
-    chmod +x x-ui bin/xray-linux-$(arch)
-    cp -f x-ui.service /etc/systemd/system/
-    wget --no-check-certificate -O /usr/bin/x-ui https://raw.githubusercontent.com/aircross/3x-ui/main/x-ui.sh
-    chmod +x /usr/local/x-ui/x-ui.sh
-    chmod +x /usr/bin/x-ui
-    config_after_install
+rollback() {
+    echo "Upgrade did not complete; restoring the previous installation." >&2
+    systemctl stop x-ui >/dev/null 2>&1 || true
+    if $program_installed; then
+        rm -rf "$INSTALL_DIR"
+    fi
+    if $program_moved; then
+        mv "$BACKUP_DIR/program" "$INSTALL_DIR" || return 1
+    fi
+    if $files_backed_up; then
+        local suffix
+        for suffix in '' '-wal' '-shm'; do
+            restore_file "$BACKUP_DIR/database$suffix" "$DB_PATH$suffix" || return 1
+        done
+        restore_file "$BACKUP_DIR/menu" "$MENU_PATH" || return 1
+        restore_file "$BACKUP_DIR/unit" "$UNIT_PATH" || return 1
+    fi
+    systemctl daemon-reload || return 1
+    if [[ -f "$UNIT_PATH" ]]; then
+        if $was_enabled; then systemctl enable x-ui || return 1; else systemctl disable x-ui || return 1; fi
+        if $was_running; then systemctl start x-ui || return 1; fi
+    fi
+    echo "Previous program, database and service state restored. Backup: $BACKUP_DIR" >&2
+}
 
+finish() {
+    local status="$1"
+    set +e
+    if (( status != 0 )) && $transaction; then
+        rollback || echo "Automatic rollback failed. Recover from $BACKUP_DIR and check journalctl -u x-ui." >&2
+    fi
+    [[ -z "$WORK_DIR" ]] || rm -rf "$WORK_DIR"
+    exit "$status"
+}
+
+verify_started() {
+    # systemctl start alone can succeed while a process immediately crashes.
+    local round
+    for round in 1 2 3 4 5; do
+        sleep 1
+        systemctl is-active --quiet x-ui || return 1
+    done
+}
+
+apply_installation() {
+    local candidate="$1"
+    systemctl is-active --quiet x-ui && was_running=true
+    systemctl is-enabled --quiet x-ui && was_enabled=true
+    BACKUP_DIR="$INSTALL_DIR.backup.$(date -u +%Y%m%dT%H%M%SZ).$$"
+    mkdir -p "$BACKUP_DIR"
+    transaction=true
+    if [[ -f "$UNIT_PATH" ]] || $was_running; then systemctl stop x-ui; fi
+    backup_state
+    if [[ -d "$INSTALL_DIR" ]]; then
+        # Keep relative certificates and local configuration; packaged files win.
+        cp -a -n "$INSTALL_DIR/." "$candidate/"
+        mv "$INSTALL_DIR" "$BACKUP_DIR/program"
+        program_moved=true
+    fi
+    mv "$candidate" "$INSTALL_DIR"
+    program_installed=true
+    mkdir -p "$(dirname "$MENU_PATH")" "$(dirname "$UNIT_PATH")" "$(dirname "$DB_PATH")"
+    install -m 755 "$INSTALL_DIR/x-ui.sh" "$MENU_PATH"
+    # Keep existing systemd environment/customization on upgrades.
+    if [[ ! -f "$UNIT_PATH" ]]; then install -m 644 "$INSTALL_DIR/x-ui.service" "$UNIT_PATH"; fi
+    if [[ ! -f "$DB_PATH" ]]; then
+        local username password basepath
+        username=$(python3 -c 'import secrets; print(secrets.token_hex(6))')
+        password=$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')
+        basepath=$(python3 -c 'import secrets; print(secrets.token_urlsafe(12))')
+        (cd "$INSTALL_DIR"; XUI_DB_FOLDER="$(dirname "$DB_PATH")" ./x-ui setting \
+            -username "$username" -password "$password" -webBasePath "$basepath")
+        [[ -s "$DB_PATH" ]] || fail "Fresh database initialization failed"
+        printf '\nNew panel login:\nUsername: %s\nPassword: %s\nBase path: /%s/\nPort: 2053\n' "$username" "$password" "$basepath"
+    fi
+    (cd "$INSTALL_DIR"; XUI_DB_FOLDER="$(dirname "$DB_PATH")" ./x-ui migrate)
     systemctl daemon-reload
     systemctl enable x-ui
     systemctl start x-ui
-    echo -e "${green}x-ui ${last_version}${plain} installation finished, it is running now..."
-    echo -e ""
-    echo -e "x-ui control menu usages: "
-    echo -e "----------------------------------------------"
-    echo -e "SUBCOMMANDS:"
-    echo -e "x-ui              - Admin Management Script"
-    echo -e "x-ui start        - Start"
-    echo -e "x-ui stop         - Stop"
-    echo -e "x-ui restart      - Restart"
-    echo -e "x-ui status       - Current Status"
-    echo -e "x-ui settings     - Current Settings"
-    echo -e "x-ui enable       - Enable Autostart on OS Startup"
-    echo -e "x-ui disable      - Disable Autostart on OS Startup"
-    echo -e "x-ui log          - Check logs"
-    echo -e "x-ui banlog       - Check Fail2ban ban logs"
-    echo -e "x-ui update       - Update"
-    echo -e "x-ui custom       - custom version"
-    echo -e "x-ui install      - Install"
-    echo -e "x-ui uninstall    - Uninstall"
-    echo -e "----------------------------------------------"
+    verify_started || fail "New service did not stay running; inspect journalctl -u x-ui"
+    transaction=false
+    echo "Installation complete. Existing settings were preserved. Backup: $BACKUP_DIR"
+    echo "Use x-ui to manage the panel, or x-ui settings to view its address."
 }
 
-echo -e "${green}Running...${plain}"
-install_base
-install_x-ui $1
+main() {
+    [[ $EUID -eq 0 ]] || fail "Run this installer as root."
+    [[ $(uname -s) == Linux ]] || fail "This installer requires Linux."
+    command -v systemctl >/dev/null || fail "This installer requires systemd."
+    install_dependencies
+    local platform tag archive candidate actual
+    platform=$(architecture)
+    WORK_DIR=$(mktemp -d /usr/local/.xui-install.XXXXXXXX)
+    trap 'finish $?' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    tag=$(release_tag "${1:-}")
+    archive="x-ui-linux-$platform.tar.gz"
+    echo "Installing $REPOSITORY $tag ($platform)"
+    fetch "https://github.com/$REPOSITORY/releases/download/$tag/$archive" "$WORK_DIR/$archive"
+    fetch "https://github.com/$REPOSITORY/releases/download/$tag/SHA256SUMS" "$WORK_DIR/SHA256SUMS"
+    verify_asset "$WORK_DIR/$archive" "$WORK_DIR/SHA256SUMS"
+    extract_package "$WORK_DIR/$archive" "$WORK_DIR"
+    candidate="$WORK_DIR/x-ui"
+    [[ -x "$candidate/x-ui" && -f "$candidate/x-ui.sh" && -f "$candidate/x-ui.service" ]] || fail "Incomplete release package"
+    actual=$("$candidate/x-ui" -v)
+    [[ "$actual" == "${tag#v}" ]] || fail "Release version mismatch: $actual"
+    preflight "$candidate"
+    apply_installation "$candidate"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

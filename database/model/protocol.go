@@ -1,6 +1,9 @@
 package model
 
 import (
+	"crypto/ecdh"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 )
@@ -14,6 +17,37 @@ func coreProtocolSettings(protocol Protocol, raw string) string {
 	}
 	if protocol == VLESS {
 		delete(settings, "encryption")
+	}
+	if protocol == Tunnel || protocol == DOKODEMO {
+		for old, modern := range map[string]string{"address": "rewriteAddress", "port": "rewritePort", "network": "allowedNetwork"} {
+			if _, exists := settings[modern]; !exists {
+				if value, ok := settings[old]; ok {
+					settings[modern] = value
+				}
+			}
+			delete(settings, old)
+		}
+	}
+	if protocol == WireGuard {
+		if peers, ok := settings["peers"].([]interface{}); ok {
+			for _, item := range peers {
+				peer, ok := item.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if public, _ := peer["publicKey"].(string); public == "" {
+					if private, _ := peer["privateKey"].(string); private != "" {
+						key, err := decodeWireguardKey(private)
+						if err == nil {
+							if k, err := ecdh.X25519().NewPrivateKey(key); err == nil {
+								peer["publicKey"] = base64.StdEncoding.EncodeToString(k.PublicKey().Bytes())
+							}
+						}
+					}
+				}
+				delete(peer, "privateKey")
+			}
+		}
 	}
 	if protocol == Hysteria {
 		settings["version"] = 2
@@ -66,6 +100,13 @@ func coreProtocolSettings(protocol Protocol, raw string) string {
 		return raw
 	}
 	return string(encoded)
+}
+
+func decodeWireguardKey(raw string) ([]byte, error) {
+	if len(raw) == 64 {
+		return hex.DecodeString(raw)
+	}
+	return base64.RawStdEncoding.DecodeString(strings.TrimRight(strings.NewReplacer("-", "+", "_", "/").Replace(raw), "="))
 }
 
 func hysteriaStreamSettings(raw string) string {
