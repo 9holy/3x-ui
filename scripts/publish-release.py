@@ -6,12 +6,17 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from urllib.parse import quote
 
 from release import asset_names, digest
 
 
-def gh_json(arguments):
-    return json.loads(subprocess.check_output(["gh"] + arguments, text=True))
+def gh_json(arguments, payload=None):
+    if payload is not None:
+        arguments = arguments + ["-H", "Content-Type: application/json", "--input", "-"]
+    return json.loads(subprocess.check_output(
+        ["gh"] + arguments, text=True,
+        input=json.dumps(payload) if payload is not None else None))
 
 
 def optional_api(path):
@@ -53,6 +58,37 @@ def tag_commit(repo, tag):
     return obj["sha"]
 
 
+def find_release(repo, tag):
+    # The tag endpoint can return 404 for a draft whose Git tag does not yet
+    # exist. Authenticated release listings include drafts; search every page.
+    matches = []
+    page = 1
+    while True:
+        releases = gh_json(["api", f"repos/{repo}/releases?per_page=100&page={page}"])
+        matches.extend(release for release in releases if release["tag_name"] == tag)
+        if len(releases) < 100:
+            break
+        page += 1
+    if len(matches) > 1:
+        raise ValueError("refusing to choose between duplicate releases for " + tag)
+    return matches[0] if matches else None
+
+
+def verify_draft(release, release_id, tag, expected_commit):
+    if release["id"] != release_id or release["tag_name"] != tag:
+        raise ValueError("release identity changed while publishing")
+    if not release["draft"]:
+        raise ValueError("refusing to overwrite an already published release")
+    if release["target_commitish"] != expected_commit:
+        raise ValueError("existing draft belongs to another source commit")
+
+
+def asset_identity(assets):
+    # Download counters change as we verify bytes; only content identity and
+    # upload completeness must remain unchanged.
+    return sorted((a["id"], a["name"], a["size"], a["state"]) for a in assets)
+
+
 def publish(directory, repo, expected_commit):
     manifest, hashes = verify_local(directory)
     if manifest["commit"] != expected_commit or manifest["repository"] != repo:
@@ -61,11 +97,9 @@ def publish(directory, repo, expected_commit):
     existing_tag = tag_commit(repo, tag)
     if existing_tag and existing_tag != expected_commit:
         raise ValueError("refusing to move a release tag to another commit")
-    existing = optional_api(f"repos/{repo}/releases/tags/{tag}")
-    if existing and not existing["draft"]:
-        raise ValueError("refusing to overwrite an already published release")
-    if existing and existing["target_commitish"] != expected_commit:
-        raise ValueError("existing draft belongs to another source commit")
+    existing = find_release(repo, tag)
+    if existing:
+        verify_draft(existing, existing["id"], tag, expected_commit)
     notes = (
         f"## 9holy/3x-ui {tag} 正式版\n\n"
         f"源代码提交：`{expected_commit}`。保留 aircross 面板与 SQLite，修复并更新协议支持。\n\n"
@@ -87,11 +121,37 @@ def publish(directory, repo, expected_commit):
             note_file.flush()
             subprocess.run(["gh", "release", "create", tag, "--repo", repo, "--target", expected_commit,
                             "--draft", "--title", tag, "--notes-file", note_file.name], check=True)
-    subprocess.run(["gh", "release", "upload", tag, "--repo", repo, "--clobber"] +
-                   [str(directory / name) for name in sorted(hashes)], check=True)
-    release = gh_json(["api", f"repos/{repo}/releases/tags/{tag}"])
+        existing = find_release(repo, tag)
+        if not existing:
+            raise ValueError("created draft is missing from the release listing")
+    release_id = existing["id"]
+    release_path = f"repos/{repo}/releases/{release_id}"
+    release = gh_json(["api", release_path])
+    verify_draft(release, release_id, tag, expected_commit)
+    # A retry resumes only this same-source draft and refreshes its notes.
+    release = gh_json(["api", "--method", "PATCH", release_path],
+                      {"name": tag, "body": notes})
+    verify_draft(release, release_id, tag, expected_commit)
+    for name in sorted(hashes):
+        # Never reselect the upload destination by tag. Recheck this exact
+        # draft before replacing an asset, including when resuming a partial run.
+        release = gh_json(["api", release_path])
+        verify_draft(release, release_id, tag, expected_commit)
+        previous = {a["name"]: a for a in release["assets"]}
+        if len(previous) != len(release["assets"]) or not set(previous).issubset(hashes):
+            raise ValueError("remote draft has unexpected or duplicate assets")
+        if name in previous:
+            subprocess.run(["gh", "api", "--method", "DELETE",
+                            f"repos/{repo}/releases/assets/{previous[name]['id']}"], check=True)
+        path = directory / name
+        gh_json(["api", "--method", "POST",
+                 f"https://uploads.github.com/repos/{repo}/releases/{release_id}/assets?name={quote(name, safe='')}",
+                 "-H", "Content-Type: application/octet-stream",
+                 "-H", f"Content-Length: {path.stat().st_size}", "--input", str(path)])
+    release = gh_json(["api", release_path])
+    verify_draft(release, release_id, tag, expected_commit)
     assets = {a["name"]: a for a in release["assets"]}
-    if not release["draft"] or set(assets) != set(hashes):
+    if len(assets) != len(release["assets"]) or set(assets) != set(hashes):
         raise ValueError("remote draft has missing or unexpected assets")
     for name, expected in hashes.items():
         asset = assets[name]
@@ -107,11 +167,25 @@ def publish(directory, repo, expected_commit):
         if actual != expected:
             raise ValueError("remote checksum mismatch; release remains draft: " + name)
         print("Remote asset verified:", name, flush=True)
+    # Check identity again before the irreversible step. In particular, never
+    # select a second draft or publish through a tag-based lookup on a retry.
+    current = find_release(repo, tag)
+    if not current:
+        raise ValueError("verified draft disappeared before publication")
+    verify_draft(current, release_id, tag, expected_commit)
+    if asset_identity(current["assets"]) != asset_identity(release["assets"]):
+        raise ValueError("remote draft assets changed during verification")
+    current_tag = tag_commit(repo, tag)
+    if current_tag and current_tag != expected_commit:
+        raise ValueError("refusing to move a release tag to another commit")
     # Publication is the final write, after every remote byte has been checked.
-    subprocess.run(["gh", "release", "edit", tag, "--repo", repo, "--draft=false",
-                    "--prerelease=false", "--latest"], check=True)
-    published = gh_json(["api", f"repos/{repo}/releases/tags/{tag}"])
-    if published["draft"] or published["prerelease"] or tag_commit(repo, tag) != expected_commit:
+    gh_json(["api", "--method", "PATCH", release_path],
+            {"draft": False, "prerelease": False, "make_latest": "true"})
+    published = gh_json(["api", release_path])
+    if (published["id"] != release_id or published["tag_name"] != tag or
+            published["target_commitish"] != expected_commit or
+            published["draft"] or published["prerelease"] or
+            tag_commit(repo, tag) != expected_commit):
         raise ValueError("published release/tag verification failed")
     print(f"Published https://github.com/{repo}/releases/tag/{tag}")
 
