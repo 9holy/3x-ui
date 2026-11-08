@@ -117,7 +117,9 @@ async function loadedInbound(id) {
                 const privateKey = Wireguard.generateKeypair().privateKey;
                 inbound.rawSettingsText = JSON.stringify({config: `[Interface]\nPrivateKey = ${privateKey}\nAddress = 10.75.0.1/24\n`});
             }
-            return inbound.toJson();
+            // Match the JSON wire actually entered below; undefined optional
+            // properties are omitted by JSON, including WireGuard preSharedKey.
+            return JSON.parse(JSON.stringify(inbound.toJson()));
         }, {protocol, index, cert, key});
         await modal().getByRole('tab', {name: 'Protocol JSON', exact: true}).click();
         await page.waitForFunction(() => inModal.activeKey === 'json');
