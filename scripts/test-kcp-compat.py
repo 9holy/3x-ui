@@ -177,8 +177,10 @@ def run_fixture(fixture, old, new, output, http_port, negative=False):
     }
     client = {
         "log": {"loglevel": "debug"},
+        # Only SOCKS TCP CONNECT is used. A SOCKS UDP listener can steal the
+        # legacy KCP client's replies when its ephemeral UDP source port overlaps.
         "inbounds": [{"listen": "127.0.0.1", "port": socks_port, "protocol": "socks",
-                      "settings": {"auth": "noauth", "udp": True}}],
+                      "settings": {"auth": "noauth", "udp": False}}],
         "outbounds": [{"protocol": "vless", "settings": {"vnext": [{
             "address": "127.0.0.1", "port": udp_port,
             "users": [{"id": CLIENT_ID, "encryption": "none"}],
