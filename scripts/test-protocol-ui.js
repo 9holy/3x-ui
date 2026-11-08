@@ -51,7 +51,13 @@ function runtime(page, model) {
             on(event, callback) {this.change=callback;}, getValue() {return this.value;},
             setValue(value) {this.value=value;this.change(this);}, toTextArea() {}})};
     `);
-    for (const file of ['util/common.js', 'util/utils.js', 'util/date-util.js', 'model/protocol.js', `model/${model}.js`, ...(model === 'xray' ? ['model/dbinbound.js'] : [])]) {
+    const requiredScripts = ['util/common.js', 'util/utils.js', 'util/date-util.js', 'model/protocol.js', `model/${model}.js`, ...(model === 'xray' ? ['model/dbinbound.js'] : [])];
+    const servedScripts = [...html.matchAll(/\bsrc="[^"]*assets\/js\/([^"?]+)(?:\?[^"]*)?"/g)]
+        .map(match => match[1]).filter(file => requiredScripts.includes(file));
+    assert.deepEqual([...servedScripts].sort(), [...requiredScripts].sort(), 'served page includes each model dependency once');
+    // Preserve the actual page order so a model loaded before ProtocolUtil fails
+    // here as it does in the browser, instead of being hidden by test setup.
+    for (const file of servedScripts) {
         run(fs.readFileSync(path.join(root, 'web/assets/js', file), 'utf8'));
     }
     run(fs.readFileSync(path.join(root, 'web/assets/moment/moment.min.js'), 'utf8'));
