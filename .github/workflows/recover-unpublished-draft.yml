@@ -1,0 +1,51 @@
+name: Recover failed unpublished release draft
+on:
+  push:
+    branches: [maintenance/recover-release-draft-438401707]
+permissions:
+  contents: write
+  actions: read
+jobs:
+  recover:
+    if: github.repository == '9holy/3x-ui'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Remove only the reviewed unpublished draft after checking the retained build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, pathlib
+          repo = '9holy/3x-ui'
+          release_id = 438401707
+          expected_commit = '472311830f4c2fecaf000a136f5fe79d6d5a774a'
+          def api(path):
+              return json.loads(subprocess.check_output(['gh','api',path], text=True))
+          draft = api(f'repos/{repo}/releases/{release_id}')
+          assert draft['id'] == release_id and draft['draft'] is True and draft['published_at'] is None
+          assert draft['tag_name'] == 'v2.4.3' and draft['target_commitish'] == expected_commit
+          assert draft['author']['login'] == 'github-actions[bot]'
+          assets = sorted([{k: a[k] for k in ['id','name','size','digest','state']} for a in draft['assets']], key=lambda a: a['name'])
+          expected_assets = [{"id":724659842,"name":"3x-ui-docker-linux-amd64.tar.gz","size":76296781,"digest":"sha256:c14e2deca592bbd410297b99aee27f33e9b48ac540e4f6721ca0a3a3befc8979","state":"uploaded"},{"id":724659846,"name":"3x-ui-docker-linux-arm64.tar.gz","size":73325851,"digest":"sha256:7806c4e753783e6dd8751dd050fc20bba01fcc7c030d3e577a6fe4bf394a5413","state":"uploaded"},{"id":724659844,"name":"3x-ui-docker-linux-armv7.tar.gz","size":85404512,"digest":"sha256:e1ce3b32ae3c64475b3d53112e0427ced3d67005a42039fb11dc6c0c775013d3","state":"uploaded"},{"id":724659847,"name":"SHA256SUMS","size":1161,"digest":"sha256:6ca4f544957ac7259de458bde09b7fcbbab7df9ecd6fc0987fb4777e3587cd2c","state":"uploaded"},{"id":724659843,"name":"install.sh","size":9941,"digest":"sha256:57940141768aab122146c26993180e5a45b24e66ed2ce5a2911fb8d425a09f94","state":"uploaded"},{"id":724659866,"name":"release-manifest.json","size":12978,"digest":"sha256:6f3cf849103e846eba8401456dac2d5effa48c0bd2b0ca577c89ec45d8fd8499","state":"uploaded"},{"id":724659868,"name":"x-ui-linux-386.tar.gz","size":52872947,"digest":"sha256:459bed4c2acb26a5a7199e1aa8766dbf65317b1c993b22b4c018a0202b6dc505","state":"uploaded"},{"id":724659878,"name":"x-ui-linux-amd64.tar.gz","size":54418649,"digest":"sha256:06082511240dc49774b4ec8ac3943a65f1e1fb1e6374c24be02c216255a705b6","state":"uploaded"},{"id":724659938,"name":"x-ui-linux-arm64.tar.gz","size":50976919,"digest":"sha256:fa0b42f3180b1a4d7ce18d4b3de1de205a3a5f3732938325ef39a1cce6a36da8","state":"uploaded"},{"id":724659962,"name":"x-ui-linux-armv5.tar.gz","size":64217484,"digest":"sha256:5bc33e7d37ccce2bc7021bdefaa887e898f16e6ab9148c134e02f55db80aee31","state":"uploaded"},{"id":724659970,"name":"x-ui-linux-armv6.tar.gz","size":64172959,"digest":"sha256:7bd6d47500cc5e9a91bddc92c1120bc6e3a79b20219b08f6cab1e5099ea66e28","state":"uploaded"},{"id":724659972,"name":"x-ui-linux-armv7.tar.gz","size":64959886,"digest":"sha256:d83aba7e222abab33d3fc4d10acc75222fcecb34b755f300f7b4509e1fbe544d","state":"uploaded"},{"id":724659979,"name":"x-ui-linux-s390x.tar.gz","size":52626837,"digest":"sha256:62172637fe0eeea900fd6527ca308624e1df4957db8ac491d3eeae1363fdc686","state":"uploaded"},{"id":724660021,"name":"x-ui.sh","size":44976,"digest":"sha256:a38dadc7f0c12bd217ab6bd8e9a714fe28c27ca26da164d96e88b36fd1e6d540","state":"uploaded"}]
+          assert assets == expected_assets, 'draft assets changed after review'
+          tag = subprocess.run(['gh','api',f'repos/{repo}/git/ref/tags/v2.4.3'], text=True, capture_output=True)
+          assert tag.returncode != 0 and 'HTTP 404' in tag.stderr, 'a tag now exists; refusing draft cleanup'
+          artifact = api(f'repos/{repo}/actions/artifacts/13626717714')
+          assert artifact['name'] == 'verified-release' and artifact['expired'] is False
+          assert artifact['size_in_bytes'] == 639343791
+          assert artifact['workflow_run']['id'] == 42504194901 and artifact['workflow_run']['head_sha'] == expected_commit
+          pathlib.Path('failed-release-draft.json').write_text(json.dumps(draft, indent=2)+'\n')
+          subprocess.run(['gh','api','--method','DELETE',f'repos/{repo}/releases/{release_id}'], check=True)
+          check = subprocess.run(['gh','api',f'repos/{repo}/releases/{release_id}'], text=True, capture_output=True)
+          assert check.returncode != 0 and 'HTTP 404' in check.stderr, 'draft deletion did not complete'
+          print('Removed only unpublished draft 438401707; verified source artifacts 13626717714 are retained for recovery.')
+          PY
+      - name: Preserve the old draft metadata
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: failed-release-draft-438401707
+          path: failed-release-draft.json
+          if-no-files-found: error
+          retention-days: 14
